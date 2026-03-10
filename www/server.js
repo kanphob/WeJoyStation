@@ -7,6 +7,7 @@ const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
+    allowEIO3: true,
     cors: {
         origin: "*",        // allow all origins (for testing)
         methods: ["GET", "POST"]
