@@ -43,10 +43,11 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.1 · r3 · 2026-03-11';
+    const BUILD = 'v2.2 · r4 · 2026-03-11';
 
     // Inject a tiny corner badge visible immediately on every page load
     (function _injectBuildBadge() {
+        if (document.getElementById('vchat-build-badge')) return;
         const badge = document.createElement('div');
         badge.id = 'vchat-build-badge';
         badge.textContent = '🎤 PVC ' + BUILD;
@@ -63,14 +64,15 @@
             'z-index:99999',
             'pointer-events:none',
             'user-select:none',
-            'letter-spacing:0.5px'
+            'letter-spacing:0.5px',
+            'box-shadow: 0 0 5px rgba(0,255,255,0.3)'
         ].join(';');
-        // Inject as soon as the body is ready
-        if (document.body) {
-            document.body.appendChild(badge);
-        } else {
-            document.addEventListener('DOMContentLoaded', () => document.body.appendChild(badge));
-        }
+        
+        const attach = () => {
+            if (document.body) document.body.appendChild(badge);
+            else setTimeout(attach, 100);
+        };
+        attach();
     })();
 
     // =========================================================================
@@ -232,7 +234,12 @@
         }
         log('ANNetwork.isConnected() = ' + ANNetwork.isConnected());
         log('ANNetwork.myId() = ' + ANNetwork.myId());
-        log('ANNetwork.room = ' + JSON.stringify(ANNetwork.room ? { name: ANNetwork.room.name, players: ANNetwork.room.players ? ANNetwork.room.players.length : 0 } : null));
+
+        // Log room status for debugging
+        const roomInfo = ANNetwork.room ? { name: ANNetwork.room.name } : 'NULL';
+        const gamePlayers = (window.ANGameManager && ANGameManager.playersData) ? ANGameManager.playersData.length : 'NULL';
+        log('ANNetwork.room = ' + JSON.stringify(roomInfo));
+        log('ANGameManager.playersData count = ' + gamePlayers);
 
         // Check socket
         if (!PVC.socket) {
@@ -247,7 +254,7 @@
             PVC.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             PVC.muted = false;
             PVC.initialized = true;
-            logOk('Microphone access GRANTED — voice chat active!');
+            logOk('Microphone access GRANTED — voice chat logic enabled!');
             PVC._createHUD();
         } catch (err) {
             logErr('Microphone access DENIED or error: ' + err.name + ' — ' + err.message, err);
@@ -258,6 +265,49 @@
         if (PVC.socket && !PVC._listenersAttached) {
             PVC._attachSocketListeners();
             PVC._listenersAttached = true;
+        }
+
+        // Start discovering players immediately after init
+        PVC.discoverPlayers();
+    };
+
+    // =========================================================================
+    // Discover and Connect to Players
+    // =========================================================================
+    PVC._discoveryAttempts = 0;
+    PVC.discoverPlayers = function () {
+        if (!PVC.initialized) return;
+
+        log('Discovering players in room...');
+        
+        // Primary source: ANGameManager.playersData (NGAME.playersData)
+        // Secondary source: ANNetwork.room.players
+        let players = [];
+        if (window.ANGameManager && ANGameManager.playersData) {
+            players = ANGameManager.playersData;
+        } else if (ANNetwork.room && ANNetwork.room.players) {
+            players = ANNetwork.room.players;
+        }
+
+        if (players.length > 0) {
+            logOk('Found ' + players.length + ' players in room sync data');
+            players.forEach(p => {
+                const pid = p.id || p.netId;
+                if (!pid) return;
+                log('  Checked player: ' + pid + (pid === ANNetwork.myId() ? ' (ME)' : ''));
+                if (pid !== ANNetwork.myId()) {
+                    PVC.connectToPlayer(pid);
+                }
+            });
+            PVC._discoveryAttempts = 0;
+        } else {
+            PVC._discoveryAttempts++;
+            if (PVC._discoveryAttempts < 10) {
+                log('No players found in sync data — retry #' + PVC._discoveryAttempts + ' in 2s...');
+                setTimeout(PVC.discoverPlayers, 2000);
+            } else {
+                log('Gave up waiting for initial player list sync');
+            }
         }
     };
 
@@ -406,10 +456,10 @@
     // Connect to a new player
     // =========================================================================
     PVC.connectToPlayer = function (peerId) {
-        log('connectToPlayer(' + peerId + ') — initialized=' + PVC.initialized);
-        if (!PVC.initialized) { log('Not init yet — cannot connect'); return; }
-        if (PVC.peers[peerId]) { log('Already have peer for ' + peerId); return; }
-        if (peerId === ANNetwork.myId()) { log('Skipping self'); return; }
+        if (!PVC.initialized) { log('Not init yet — cannot connect to ' + peerId); return; }
+        if (PVC.peers[peerId]) { return; } // already have peer
+        if (peerId === ANNetwork.myId()) { return; }
+        log('Connecting to Player: ' + peerId);
         PVC._createPeer(peerId, true);
     };
 
@@ -421,11 +471,18 @@
         const myX = $gamePlayer.x;
         const myY = $gamePlayer.y;
 
-        if (!ANNetwork || !ANNetwork.room || !ANNetwork.room.players) return;
+        // Get player list from ANGameManager
+        let players = [];
+        if (window.ANGameManager && ANGameManager.playersData) {
+            players = ANGameManager.playersData;
+        } else if (ANNetwork.room && ANNetwork.room.players) {
+            players = ANNetwork.room.players;
+        }
 
-        for (const player of ANNetwork.room.players) {
-            const peerId = player.id;
-            if (peerId === ANNetwork.myId()) continue;
+        for (const player of players) {
+            const peerId = player.id || player.netId;
+            if (!peerId || peerId === ANNetwork.myId()) continue;
+            
             const peer = PVC.peers[peerId];
             if (!peer || !peer.audioEl) continue;
 
@@ -453,6 +510,9 @@
                 const dist = Math.abs(myX - peerX) + Math.abs(myY - peerY);
                 const vol  = Math.max(0, 1 - dist / MAX_DISTANCE);
                 peer.audioEl.volume = vol;
+            } else {
+                // If character not found on map, mute them
+                peer.audioEl.volume = 0;
             }
         }
     };
@@ -473,14 +533,12 @@
     // =========================================================================
     PVC.destroy = function () {
         log('Destroying proximity voice chat...');
-        if (PVC.socket && ANNetwork && ANNetwork.room && ANNetwork.room.players) {
-            for (const player of ANNetwork.room.players) {
-                if (player.id !== ANNetwork.myId()) {
-                    PVC.socket.emit('vchat_end', { to: player.id, from: ANNetwork.myId() });
-                }
+        if (PVC.socket && ANNetwork && ANNetwork.myId()) {
+            for (const peerId in PVC.peers) {
+                PVC.socket.emit('vchat_end', { to: peerId, from: ANNetwork.myId() });
+                PVC._closePeer(peerId);
             }
         }
-        for (const peerId in PVC.peers) PVC._closePeer(peerId);
         if (PVC.localStream) {
             PVC.localStream.getTracks().forEach(t => t.stop());
             PVC.localStream = null;
@@ -502,7 +560,8 @@
             'background:rgba(0,0,0,0.55)', 'color:#fff',
             'font-size:20px', 'padding:4px 8px', 'border-radius:8px',
             'z-index:9999', 'pointer-events:none',
-            'font-family:sans-serif', 'user-select:none'
+            'font-family:sans-serif', 'user-select:none',
+            'border: 1px solid rgba(255,255,255,0.2)'
         ].join(';');
         document.body.appendChild(el);
         PVC.hudEl = el;
@@ -512,6 +571,7 @@
     PVC._updateHUD = function () {
         if (!PVC.hudEl) return;
         PVC.hudEl.textContent = PVC.muted ? '🔇 Muted' : '🎤 Voice';
+        PVC.hudEl.style.color = PVC.muted ? '#ff6060' : '#60ff90';
     };
 
     PVC._removeHUD = function () {
@@ -533,22 +593,14 @@
             log('ANNetwork undefined — not a multiplayer session, skipping');
             return;
         }
-        log('ANNetwork.isConnected() = ' + ANNetwork.isConnected());
-
+        
         if (ANNetwork.isConnected()) {
             if (!PVC.initialized) {
                 log('Calling PVC.init()...');
                 PVC.init();
-            }
-            // Connect to all players already in room
-            if (ANNetwork.room && ANNetwork.room.players) {
-                log('Players in room: ' + ANNetwork.room.players.length);
-                ANNetwork.room.players.forEach(p => {
-                    log('  Player: ' + p.id + (p.id === ANNetwork.myId() ? ' (ME)' : ''));
-                    if (p.id !== ANNetwork.myId()) PVC.connectToPlayer(p.id);
-                });
             } else {
-                log('ANNetwork.room or room.players is null/undefined');
+                // Already initialized, just trigger discovery
+                PVC.discoverPlayers();
             }
         } else {
             log('Not connected to network — proximity voice chat idle');
@@ -573,6 +625,7 @@
     const _Scene_Map_terminate = Scene_Map.prototype.terminate;
     Scene_Map.prototype.terminate = function () {
         _Scene_Map_terminate.call(this);
+        // We only destroy if we are actually disconnected, to keep it alive during map transfers if possible
         if (!ANNetwork || !ANNetwork.isConnected()) {
             log('Leaving network scene — destroying voice chat');
             PVC.destroy();
@@ -615,6 +668,7 @@
     // =========================================================================
     window.vchatDebug = function () {
         console.group('%c[VoiceChat] Debug Report', LOG_STYLE);
+        console.log('BUILD            :', BUILD);
         console.log('initialized      :', PVC.initialized);
         console.log('socket           :', PVC.socket ? 'EXISTS (id=' + PVC.socket.id + ')' : 'NULL');
         console.log('socketReady      :', PVC._socketReady);
@@ -624,7 +678,9 @@
         console.log('muteKey          :', MUTE_KEY);
         console.log('ANNetwork conn   :', typeof ANNetwork !== 'undefined' ? ANNetwork.isConnected() : 'ANNetwork MISSING');
         console.log('ANNetwork.myId() :', typeof ANNetwork !== 'undefined' ? ANNetwork.myId() : 'N/A');
-        console.log('room players     :', ANNetwork && ANNetwork.room && ANNetwork.room.players ? ANNetwork.room.players.map(p => p.id) : 'none');
+        
+        const players = (window.ANGameManager && ANGameManager.playersData) ? ANGameManager.playersData : (ANNetwork.room ? ANNetwork.room.players : []);
+        console.log('discovered players:', players ? players.map(p => p.id || p.netId) : 'none');
         console.log('active peers     :', Object.keys(PVC.peers));
         for (const [id, peer] of Object.entries(PVC.peers)) {
             console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + peer.audioEl.volume.toFixed(2));
@@ -635,7 +691,7 @@
     // Expose for debugging
     window.ProximityVoiceChat = PVC;
 
-    logOk('Proximity Voice Chat v2.1 loaded (maxDist=' + MAX_DISTANCE + ' tiles, muteKey=' + MUTE_KEY + ')');
+    logOk('Proximity Voice Chat ' + BUILD + ' loaded');
     log('Type vchatDebug() in console any time to see full state');
 
 })();
