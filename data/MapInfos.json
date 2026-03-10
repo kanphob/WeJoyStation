@@ -1,7 +1,7 @@
 [
 null,
 null,
-{"id":2,"expanded":true,"name":"First_Map","order":2,"parentId":0,"scrollX":976.8,"scrollY":774.5999999999999},
+{"id":2,"expanded":true,"name":"First_Map","order":2,"parentId":0,"scrollX":969,"scrollY":767},
 {"id":3,"expanded":false,"name":"Second_Map","order":3,"parentId":2,"scrollX":762.5,"scrollY":781},
 null,
 {"id":5,"expanded":true,"name":"Tests","order":4,"parentId":0,"scrollX":445.5,"scrollY":325},
