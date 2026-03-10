@@ -41,6 +41,39 @@
     const MUTE_KEY     = getParam('muteKey', 'm').toLowerCase();
 
     // =========================================================================
+    // Build version — update this string whenever you push a new version
+    // =========================================================================
+    const BUILD = 'v2.1 · r3 · 2026-03-11';
+
+    // Inject a tiny corner badge visible immediately on every page load
+    (function _injectBuildBadge() {
+        const badge = document.createElement('div');
+        badge.id = 'vchat-build-badge';
+        badge.textContent = '🎤 PVC ' + BUILD;
+        badge.style.cssText = [
+            'position:fixed',
+            'top:4px',
+            'left:4px',
+            'background:rgba(0,0,0,0.6)',
+            'color:#0ff',
+            'font-size:10px',
+            'font-family:monospace',
+            'padding:2px 6px',
+            'border-radius:4px',
+            'z-index:99999',
+            'pointer-events:none',
+            'user-select:none',
+            'letter-spacing:0.5px'
+        ].join(';');
+        // Inject as soon as the body is ready
+        if (document.body) {
+            document.body.appendChild(badge);
+        } else {
+            document.addEventListener('DOMContentLoaded', () => document.body.appendChild(badge));
+        }
+    })();
+
+    // =========================================================================
     // Logging helpers
     // =========================================================================
     const LOG_STYLE = 'color:#00cfff;font-weight:bold';
