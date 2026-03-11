@@ -493,48 +493,40 @@
         const myX = $gamePlayer.x;
         const myY = $gamePlayer.y;
 
-        // Get player list from ANGameManager
-        let players = [];
-        if (window.ANGameManager && ANGameManager.playersData) {
-            players = ANGameManager.playersData;
-        } else if (ANNetwork.room && ANNetwork.room.players) {
-            players = ANNetwork.room.players;
-        }
-
-        for (const player of players) {
-            const peerId = player.id || player.netId;
-            if (!peerId || peerId === ANNetwork.myId()) continue;
-            
+        for (const peerId in PVC.peers) {
             const peer = PVC.peers[peerId];
             if (!peer || !peer.audioEl) continue;
 
             let peerX = null, peerY = null;
 
-            // Try ANMapManager
+            // Try ANMapManager (Alpha_NETZ)
             if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
                 const chars = ANMapManager.networkCharacters();
                 if (chars) {
-                    const ch = chars.find(c => c._netId === peerId || c.netId === peerId);
+                    const ch = chars.find(c => (c._netId === peerId || c.netId === peerId));
                     if (ch) { peerX = ch.x; peerY = ch.y; }
                 }
             }
 
-            // Fallback: scan events
-            if (peerX === null && $gameMap._events) {
-                for (const ev of $gameMap._events) {
-                    if (ev && (ev._netId === peerId || ev.netId === peerId)) {
-                        peerX = ev.x; peerY = ev.y; break;
+            // Fallback: scan all game characters (efficient enough for MZ)
+            if (peerX === null) {
+                const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
+                for (const char of allChars) {
+                    if (char && (char._netId === peerId || char.netId === peerId)) {
+                        peerX = char.x; peerY = char.y; break;
                     }
                 }
             }
 
             if (peerX !== null) {
                 const dist = Math.abs(myX - peerX) + Math.abs(myY - peerY);
-                const vol  = Math.max(0, 1 - dist / MAX_DISTANCE);
+                const vol  = Math.max(0, 1 - (dist / MAX_DISTANCE));
                 peer.audioEl.volume = vol;
+                peer.lastVolume = vol; // For debug report
             } else {
-                // If character not found on map, mute them
+                // If character not found on map, they might be in a menu or another map
                 peer.audioEl.volume = 0;
+                peer.lastVolume = 0;
             }
         }
     };
@@ -705,7 +697,8 @@
         console.log('discovered players:', players ? players.map(p => p.id || p.netId) : 'none');
         console.log('active peers     :', Object.keys(PVC.peers));
         for (const [id, peer] of Object.entries(PVC.peers)) {
-            console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + peer.audioEl.volume.toFixed(2));
+            const v = peer.lastVolume !== undefined ? peer.lastVolume.toFixed(2) : '?.??';
+            console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v);
         }
         console.groupEnd();
     };
