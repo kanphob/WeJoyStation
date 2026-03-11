@@ -43,7 +43,7 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r10 · 2026-03-11';
+    const BUILD = 'v2.2 · r11 · 2026-03-11';
     const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
 
     // Inject a tiny corner badge visible immediately on every page load
@@ -109,7 +109,8 @@
         muted:        false,
         initialized:  false,
         hudEl:        null,
-        indicatorEl:  null, // Noise Detection HUD icon
+        indicatorEl:  null, // Mic icon
+        meterEl:      null, // Volume bar fill
         statusEl:     null, // Mute/Voice text
         audioCtx:     null, // Web Audio Context
         localAnalyser: null, 
@@ -544,8 +545,9 @@
         // Local player
         const localVol = PVC._getVolume(PVC.localAnalyser);
         PVC.isSpeaking = !PVC.muted && localVol > SPEAKING_THRESHOLD;
+        PVC.lastLocalVol = localVol;
         
-        // Update HUD every frame to show local talking status
+        // Update HUD every frame to show local talking status + meter
         PVC._updateHUD();
 
         // Remote peers
@@ -557,57 +559,6 @@
             const isSpeaking = vol > SPEAKING_THRESHOLD;
             peer.isSpeaking = isSpeaking;
             peer.lastRawVolume = vol;
-
-            // Note: Overhead icons removed as requested.
-            // Only tracking noise levels for debug/HUD now.
-        }
-    };
-
-    // =========================================================================
-    // Manage Overhead Icons (DOM-based for maximum compatibility with all MZ/MV)
-    // =========================================================================
-    PVC._icons = new Map(); // Character -> DOM Element
-
-    PVC._updateCharacterIcon = function (char, visible) {
-        if (!char) return;
-        let el = PVC._icons.get(char);
-
-        if (visible) {
-            if (!el) {
-                el = document.createElement('div');
-                el.style.cssText = [
-                    'position:fixed',
-                    'pointer-events:none',
-                    'width:48px', 'height:48px',
-                    'background-image:url("img/system/vchat_talking.png")',
-                    'background-size:contain',
-                    'background-repeat:no-repeat',
-                    'z-index:9000',
-                    'transition: transform 0.1s, opacity 0.2s',
-                    'transform: scale(0)',
-                    'opacity: 0'
-                ].join(';');
-                document.body.appendChild(el);
-                PVC._icons.set(char, el);
-            }
-            // Position above character (center horizontally)
-            const x = char.screenX();
-            const y = char.screenY() - 70; // Slightly higher
-            el.style.left = (x - 24) + 'px';
-            el.style.top = (y - 24) + 'px';
-            el.style.opacity = '1';
-            el.style.transform = 'scale(1)';
-        } else if (el) {
-            el.style.opacity = '0';
-            el.style.transform = 'scale(0.5)';
-            // Remove after fade
-            if (parseFloat(el.style.opacity) === 0 && !el._deleting) {
-                el._deleting = true;
-                setTimeout(() => {
-                    if (el.parentNode) el.parentNode.removeChild(el);
-                    PVC._icons.delete(char);
-                }, 300);
-            }
         }
     };
 
@@ -699,64 +650,81 @@
         el.id = 'vchat-hud';
         el.style.cssText = [
             'position:fixed', 'bottom:12px', 'right:12px',
-            'display:flex', 'flex-direction:column', 'align-items:center', 'gap:4px',
-            'background:rgba(0,0,0,0.6)', 'padding:8px', 'border-radius:12px',
+            'display:flex', 'flex-direction:column', 'align-items:center', 'gap:6px',
+            'background:rgba(0,0,0,0.6)', 'padding:10px', 'border-radius:14px',
             'z-index:9999', 'pointer-events:none',
             'font-family:sans-serif', 'user-select:none',
             'border: 1px solid rgba(255,255,255,0.15)',
-            'box-shadow: 0 4px 15px rgba(0,0,0,0.4)',
-            'backdrop-filter: blur(4px)'
+            'box-shadow: 0 4px 15px rgba(0,0,0,0.5)',
+            'backdrop-filter: blur(5px)',
+            'width: 64px'
         ].join(';');
 
-        // 1. Noise Detection Icon (Top)
+        // 1. Mic Icon (Top)
         const indicator = document.createElement('div');
         indicator.style.cssText = [
-            'width:32px', 'height:32px',
+            'width:40px', 'height:40px',
             'background-image:url("img/system/vchat_talking.png")',
             'background-size:contain', 'background-repeat:no-repeat',
             'transition: filter 0.2s, transform 0.1s',
-            'filter: grayscale(1) brightness(0.5)',
-            'opacity: 0.6'
+            'filter: grayscale(1) brightness(0.5)'
         ].join(';');
         
-        // 2. Status Text (Bottom)
+        // 2. Volume Meter Bar (Middle)
+        const meterContainer = document.createElement('div');
+        meterContainer.style.cssText = 'width:100%; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;';
+        const meterFill = document.createElement('div');
+        meterFill.style.cssText = 'width:0%; height:100%; background:#60ff90; transition: width 0.05s; box-shadow: 0 0 5px #60ff90;';
+        meterContainer.appendChild(meterFill);
+
+        // 3. Status Text (Bottom)
         const status = document.createElement('div');
-        status.style.cssText = 'font-size:14px; font-weight:bold; letter-spacing:0.5px;';
+        status.style.cssText = 'font-size:12px; font-weight:bold; letter-spacing:1px;';
 
         el.appendChild(indicator);
+        el.appendChild(meterContainer);
         el.appendChild(status);
         document.body.appendChild(el);
         
         PVC.hudEl = el;
         PVC.indicatorEl = indicator;
+        PVC.meterEl = meterFill;
         PVC.statusEl = status;
         PVC._updateHUD();
     };
 
     PVC._updateHUD = function () {
-        if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl) return;
+        if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl || !PVC.meterEl) return;
         
         if (PVC.muted) {
-            // Muted State: Red Icon + Red Text
+            // MUTED: Red Theme
             PVC.statusEl.textContent = 'MUTED';
             PVC.statusEl.style.color = '#ff6060';
-            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.7) sepia(1) hue-rotate(-50deg) saturate(3)'; // Force Red
+            // Use CSS filters to force Red on the transparent image
+            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.8) sepia(1) hue-rotate(-50deg) saturate(5) drop-shadow(0 0 5px #ff6060)';
             PVC.indicatorEl.style.opacity = '1';
             PVC.indicatorEl.style.transform = 'scale(1.0)';
+            PVC.meterEl.style.width = '0%';
+            PVC.meterEl.style.background = '#ff6060';
         } else {
-            // Unmuted State
+            // VOICE: Green/Cyan Theme
             PVC.statusEl.textContent = 'VOICE';
             PVC.statusEl.style.color = '#60ff90';
+            PVC.meterEl.style.background = '#60ff90';
             
+            // Volume Meter update
+            const volPercent = Math.min(100, Math.max(0, (PVC.lastLocalVol || 0) * 200)); // boost for visual
+            PVC.meterEl.style.width = volPercent + '%';
+
             if (PVC.isSpeaking) {
-                // Talking: Bright Green Glow
+                // Talking: Glowing Green
                 PVC.indicatorEl.style.filter = 'grayscale(0) brightness(1.3) drop-shadow(0 0 8px #60ff90)';
                 PVC.indicatorEl.style.opacity = '1';
                 PVC.indicatorEl.style.transform = 'scale(1.1)';
             } else {
-                // Idle: Dim/Gray Green
-                PVC.indicatorEl.style.filter = 'grayscale(0.6) brightness(0.6)';
-                PVC.indicatorEl.style.opacity = '0.6';
+                // Idle: Dim Green
+                PVC.indicatorEl.style.filter = 'grayscale(0.7) brightness(0.5)';
+                PVC.indicatorEl.style.opacity = '0.7';
                 PVC.indicatorEl.style.transform = 'scale(1.0)';
             }
         }
