@@ -109,6 +109,7 @@
         initialized:  false,
         hudEl:        null,
         _socketReady: false,
+        PROXIMITY_ENABLED: false, // Disabling proximity as requested (Global Map Voice)
     };
 
     // =========================================================================
@@ -497,6 +498,12 @@
             const peer = PVC.peers[peerId];
             if (!peer || !peer.audioEl) continue;
 
+            if (!PVC.PROXIMITY_ENABLED) {
+                peer.audioEl.volume = 1.0;
+                peer.lastVolume = 1.0;
+                continue;
+            }
+
             let peerX = null, peerY = null;
 
             // Try ANMapManager (Alpha_NETZ)
@@ -508,11 +515,11 @@
                 }
             }
 
-            // Fallback: scan all game characters (efficient enough for MZ)
+            // Fallback: scan all game characters
             if (peerX === null) {
                 const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
                 for (const char of allChars) {
-                    if (char && (char._netId === peerId || char.netId === peerId)) {
+                    if (char && (char._netId === peerId || char.netId === peerId || (char._title && char._title.includes(peerId)))) {
                         peerX = char.x; peerY = char.y; break;
                     }
                 }
@@ -522,11 +529,12 @@
                 const dist = Math.abs(myX - peerX) + Math.abs(myY - peerY);
                 const vol  = Math.max(0, 1 - (dist / MAX_DISTANCE));
                 peer.audioEl.volume = vol;
-                peer.lastVolume = vol; // For debug report
+                peer.lastVolume = vol;
             } else {
-                // If character not found on map, they might be in a menu or another map
-                peer.audioEl.volume = 0;
-                peer.lastVolume = 0;
+                // If character not found on map, we default to FULL VOLUME (1.0) 
+                // instead of silence, so users can at least hear each other!
+                peer.audioEl.volume = 1.0;
+                peer.lastVolume = 1.0;
             }
         }
     };
@@ -689,6 +697,7 @@
         console.log('localStream      :', PVC.localStream ? 'ACTIVE' : 'NULL');
         console.log('muted            :', PVC.muted);
         console.log('maxDistance      :', MAX_DISTANCE, 'tiles');
+        console.log('proximityEnabled :', PVC.PROXIMITY_ENABLED);
         console.log('muteKey          :', MUTE_KEY);
         console.log('ANNetwork conn   :', typeof ANNetwork !== 'undefined' ? ANNetwork.isConnected() : 'ANNetwork MISSING');
         console.log('ANNetwork.myId() :', typeof ANNetwork !== 'undefined' ? ANNetwork.myId() : 'N/A');
