@@ -43,7 +43,7 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r4 · 2026-03-11';
+    const BUILD = 'v2.2 · r5 · 2026-03-11';
 
     // Inject a tiny corner badge visible immediately on every page load
     (function _injectBuildBadge() {
@@ -391,8 +391,9 @@
         };
 
         if (isInitiator) {
-            pc.onnegotiationneeded = async () => {
-                log('Negotiation needed for ' + peerId + ' — creating offer...');
+            // Manual trigger instead of relying on onnegotiationneeded
+            setTimeout(async () => {
+                log('Initiating handshake for ' + peerId + ' — creating offer...');
                 try {
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
@@ -401,7 +402,7 @@
                 } catch (e) {
                     logErr('Offer creation failed', e);
                 }
-            };
+            }, 500); // Tiny delay to ensure tracks are ready
         }
 
         return pc;
