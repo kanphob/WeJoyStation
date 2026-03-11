@@ -700,6 +700,18 @@
             const v = peer.lastVolume !== undefined ? peer.lastVolume.toFixed(2) : '?.??';
             console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v);
         }
+        // --- Diagnostics for identifying characters ---
+        console.group('Map Characters Diagnostic');
+        const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
+        allChars.forEach((c, index) => {
+            if (!c) return;
+            const keys = Object.keys(c).filter(k => k.includes('Net') || k.includes('Id') || k.includes('net') || k.includes('ID'));
+            const data = {};
+            keys.forEach(k => data[k] = c[k]);
+            console.log(`[Char ${index}] x:${c.x} y:${c.y}`, data, c);
+        });
+        console.groupEnd();
+
         console.groupEnd();
     };
 
