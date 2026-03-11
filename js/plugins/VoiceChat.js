@@ -43,7 +43,8 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r5 · 2026-03-11';
+    const BUILD = 'v2.2 · r6 · 2026-03-11';
+    const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
 
     // Inject a tiny corner badge visible immediately on every page load
     (function _injectBuildBadge() {
@@ -104,12 +105,14 @@
     const PVC = {
         localStream:  null,
         socket:       null,
-        peers:        {},   // peerId -> { pc, audioEl }
+        peers:        {},   // peerId -> { pc, audioEl, analyser }
         muted:        false,
         initialized:  false,
         hudEl:        null,
+        audioCtx:     null, // Web Audio Context
+        localAnalyser: null, 
         _socketReady: false,
-        PROXIMITY_ENABLED: false, // Disabling proximity as requested (Global Map Voice)
+        PROXIMITY_ENABLED: false, 
     };
 
     // =========================================================================
@@ -276,6 +279,19 @@
         try {
             PVC.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             PVC.muted = false;
+            
+            // Setup AudioContext for analysis
+            if (!PVC.audioCtx) {
+                PVC.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (PVC.audioCtx.state === 'suspended') PVC.audioCtx.resume();
+            
+            // Local Analyser
+            const source = PVC.audioCtx.createMediaStreamSource(PVC.localStream);
+            PVC.localAnalyser = PVC.audioCtx.createAnalyser();
+            PVC.localAnalyser.fftSize = 512;
+            source.connect(PVC.localAnalyser);
+
             PVC.initialized = true;
             logOk('Microphone access GRANTED — voice chat logic enabled!');
             PVC._createHUD();
@@ -363,7 +379,22 @@
 
         pc.ontrack = (event) => {
             logOk('Receiving audio track from ' + peerId);
-            audioEl.srcObject = event.streams[0];
+            const stream = event.streams[0];
+            audioEl.srcObject = stream;
+            
+            // Setup Analyser for this peer
+            try {
+                if (PVC.audioCtx) {
+                    const source = PVC.audioCtx.createMediaStreamSource(stream);
+                    const analyser = PVC.audioCtx.createAnalyser();
+                    analyser.fftSize = 512;
+                    source.connect(analyser);
+                    if (PVC.peers[peerId]) PVC.peers[peerId].analyser = analyser;
+                    log('Attached AnalyserNode to peer ' + peerId);
+                }
+            } catch (e) {
+                logErr('Failed to attach AnalyserNode to ' + peerId, e);
+            }
         };
 
         pc.onicecandidate = (event) => {
@@ -490,6 +521,92 @@
     // =========================================================================
     // Update volumes every frame
     // =========================================================================
+    // =========================================================================
+    // Helper to get Average Volume (RMS) from AnalyserNode
+    // =========================================================================
+    PVC._getVolume = function (analyser) {
+        if (!analyser) return 0;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        return sum / data.length / 255; // Normalize 0-1
+    };
+
+    // =========================================================================
+    // Update speaking state and icons for all players
+    // =========================================================================
+    PVC.updateVoiceActivity = function () {
+        if (!PVC.initialized || !$gamePlayer || !$gameMap) return;
+
+        // Local player
+        const localVol = PVC._getVolume(PVC.localAnalyser);
+        PVC.isSpeaking = !PVC.muted && localVol > SPEAKING_THRESHOLD;
+        PVC._updateCharacterIcon($gamePlayer, PVC.isSpeaking);
+
+        // Remote peers
+        for (const peerId in PVC.peers) {
+            const peer = PVC.peers[peerId];
+            if (!peer || !peer.analyser) continue;
+            
+            const vol = PVC._getVolume(peer.analyser);
+            const isSpeaking = vol > SPEAKING_THRESHOLD;
+            peer.isSpeaking = isSpeaking;
+            peer.lastRawVolume = vol;
+
+            // Find character on map to show icon
+            let char = null;
+            if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
+                const chars = ANMapManager.networkCharacters();
+                if (chars) char = chars.find(c => (c._netId === peerId || c.netId === peerId));
+            }
+            if (!char) {
+                const allChars = [$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])].flat();
+                char = allChars.find(c => c && (c._netId === peerId || c.netId === peerId || (c._title && c._title.includes(peerId))));
+            }
+
+            if (char) PVC._updateCharacterIcon(char, isSpeaking);
+        }
+    };
+
+    // =========================================================================
+    // Manage Overhead Icons (DOM-based for maximum compatibility with all MZ/MV)
+    // =========================================================================
+    PVC._icons = new Map(); // Character -> DOM Element
+
+    PVC._updateCharacterIcon = function (char, visible) {
+        if (!char) return;
+        let el = PVC._icons.get(char);
+
+        if (visible) {
+            if (!el) {
+                el = document.createElement('div');
+                el.innerHTML = '🎤';
+                el.style.cssText = 'position:fixed; pointer-events:none; font-size:24px; text-shadow: 0 0 5px #000; z-index:9000; transition: transform 0.1s, opacity 0.2s;';
+                document.body.appendChild(el);
+                PVC._icons.set(char, el);
+            }
+            // Position above character
+            const x = char.screenX();
+            const y = char.screenY() - 60; // Offset above head
+            el.style.left = (x - 12) + 'px';
+            el.style.top = (y - 12) + 'px';
+            el.style.opacity = '1';
+            el.style.transform = 'scale(1.2)';
+        } else if (el) {
+            el.style.opacity = '0';
+            el.style.transform = 'scale(0.5)';
+            // Remove after fade
+            if (parseFloat(el.style.opacity) === 0 && !el._deleting) {
+                el._deleting = true;
+                setTimeout(() => {
+                    if (el.parentNode) el.parentNode.removeChild(el);
+                    PVC._icons.delete(char);
+                }, 300);
+            }
+        }
+    };
+
     PVC.updateVolumes = function () {
         if (!PVC.initialized || !$gamePlayer || !$gameMap) return;
         const myX = $gamePlayer.x;
@@ -532,8 +649,6 @@
                 peer.audioEl.volume = vol;
                 peer.lastVolume = vol;
             } else {
-                // If character not found on map, we default to FULL VOLUME (1.0) 
-                // instead of silence, so users can at least hear each other!
                 peer.audioEl.volume = 1.0;
                 peer.lastVolume = 1.0;
             }
@@ -638,6 +753,7 @@
         _Scene_Map_update.call(this);
         if (PVC.initialized) {
             PVC.updateVolumes();
+            PVC.updateVoiceActivity(); // New: Detect noise and show icons
             if (Input.isTriggered(MUTE_KEY)) PVC.toggleMute();
         }
     };
@@ -708,7 +824,8 @@
         console.log('active peers     :', Object.keys(PVC.peers));
         for (const [id, peer] of Object.entries(PVC.peers)) {
             const v = peer.lastVolume !== undefined ? peer.lastVolume.toFixed(2) : '?.??';
-            console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v);
+            const noise = peer.lastRawVolume !== undefined ? peer.lastRawVolume.toFixed(3) : '?.???';
+            console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v + ' noise=' + noise + (peer.isSpeaking ? ' [TALKING]' : ''));
         }
         // --- Diagnostics for identifying characters ---
         console.group('Map Characters Diagnostic');
