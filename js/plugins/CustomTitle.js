@@ -60,12 +60,54 @@
         }
     };
 
+    // Particle system for "Fun & Sharp" details
+    Scene_Title.prototype.createParticles = function() {
+        this._particles = [];
+        this._particleContainer = new Sprite();
+        this.addChildAt(this._particleContainer, 1); // Above background
+        
+        for (let i = 0; i < 50; i++) {
+            const p = new Sprite(new Bitmap(4, 4));
+            p.bitmap.fillAll('white');
+            p.x = Math.random() * Graphics.width;
+            p.y = Math.random() * Graphics.height;
+            p.opacity = Math.random() * 255;
+            p._speed = 0.5 + Math.random();
+            this._particleContainer.addChild(p);
+            this._particles.push(p);
+        }
+    };
+
+    Scene_Title.prototype.updateParticles = function() {
+        if (!this._particles) return;
+        this._particles.forEach(p => {
+            p.y -= p._speed;
+            p.opacity -= 1;
+            if (p.y < -10 || p.opacity <= 0) {
+                p.y = Graphics.height + 10;
+                p.x = Math.random() * Graphics.width;
+                p.opacity = 255;
+            }
+            // Add "sharp" glint
+            const glint = Math.sin(Date.now() * 0.01 + p.x) * 100;
+            p.scale.x = 1 + (glint / 200);
+            p.scale.y = 1 + (glint / 200);
+        });
+    };
+
     // Auto-scaling and effects logic
     const _Scene_Title_update = Scene_Title.prototype.update;
     Scene_Title.prototype.update = function() {
         _Scene_Title_update.call(this);
         this.updateCatPositioning();
         this.updateBackgroundGlow();
+        this.updateParticles();
+    };
+
+    const _Scene_Title_create_particles = Scene_Title.prototype.create;
+    Scene_Title.prototype.create = function() {
+        _Scene_Title_create_particles.call(this);
+        this.createParticles();
     };
 
     Scene_Title.prototype.updateBackgroundGlow = function() {
@@ -74,27 +116,17 @@
         this._glowTick++;
         
         const tick = this._glowTick;
-        // 1. Shimmering (Brightness pulse)
-        const glow = 100 + Math.sin(tick * 0.05) * 15; // 85% to 115% brightness
-        
-        // RPG Maker MV Sprites don't have direct brightness filters easily accessible without PIXI filters,
-        // but we can use colorTone or opacity for a similar "breathing" feel.
-        // Let's use subtle scale for "look like moving but same place"
-        const scaleMod = 1 + Math.sin(tick * 0.03) * 0.01; // tiny 1% pulsing
+        // Subtle scale for "look like moving but same place"
+        const scaleMod = 1 + Math.sin(tick * 0.02) * 0.005; // tiny pulse
         this._backSprite1.scale.x = scaleMod;
         this._backSprite1.scale.y = scaleMod;
         
-        // Subtle opacity pulsing for "glister"
-        this._backSprite1.opacity = 220 + Math.sin(tick * 0.08) * 35; // 185 to 255
+        // Subtle opacity pulsing
+        this._backSprite1.opacity = 230 + Math.sin(tick * 0.05) * 25; 
     };
 
     Scene_Title.prototype.updateCatPositioning = function() {
         if (!this._catGifElements) return;
-        
-        // We use percentages in CSS (10% left/right, 10% bottom) 
-        // which helps with basic responsiveness.
-        // If the user wants extreme precision relative to the canvas, 
-        // we'd need more complex math here.
     };
 
 })();

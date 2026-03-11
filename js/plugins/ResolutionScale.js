@@ -30,10 +30,12 @@
     Graphics._updateRealScale = function() {
         if (scaleMode === 'height') {
             // Force scale to be based strictly on window height vs game height
-            this._realScale = (window.innerHeight / this._height) * scaleMultiplier;
+            this._realScale = (window.innerHeight / this._height);
         } else {
             _Graphics_updateRealScale.call(this);
         }
+        // Apply the manual multiplier on top of whatever mode is active
+        this._realScale *= scaleMultiplier;
     };
 
     // Ensure stretch is on by default so it actually uses _realScale
