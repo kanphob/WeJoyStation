@@ -23,7 +23,7 @@
         
         const createGif = (side) => {
             const img = document.createElement('img');
-            img.src = 'img/system/vchat_title_cat.gif';
+            img.src = 'img/system/vchat_title_cat.gif?v=' + Date.now();
             img.style.position = 'fixed';
             img.style.bottom = '10%';
             img.style.width = '200px'; // Adjust based on GIF size
