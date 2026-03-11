@@ -60,11 +60,32 @@
         }
     };
 
-    // Auto-scaling logic to keep icons in place if window resizes
+    // Auto-scaling and effects logic
     const _Scene_Title_update = Scene_Title.prototype.update;
     Scene_Title.prototype.update = function() {
         _Scene_Title_update.call(this);
         this.updateCatPositioning();
+        this.updateBackgroundGlow();
+    };
+
+    Scene_Title.prototype.updateBackgroundGlow = function() {
+        if (!this._backSprite1) return;
+        if (!this._glowTick) this._glowTick = 0;
+        this._glowTick++;
+        
+        const tick = this._glowTick;
+        // 1. Shimmering (Brightness pulse)
+        const glow = 100 + Math.sin(tick * 0.05) * 15; // 85% to 115% brightness
+        
+        // RPG Maker MV Sprites don't have direct brightness filters easily accessible without PIXI filters,
+        // but we can use colorTone or opacity for a similar "breathing" feel.
+        // Let's use subtle scale for "look like moving but same place"
+        const scaleMod = 1 + Math.sin(tick * 0.03) * 0.01; // tiny 1% pulsing
+        this._backSprite1.scale.x = scaleMod;
+        this._backSprite1.scale.y = scaleMod;
+        
+        // Subtle opacity pulsing for "glister"
+        this._backSprite1.opacity = 220 + Math.sin(tick * 0.08) * 35; // 185 to 255
     };
 
     Scene_Title.prototype.updateCatPositioning = function() {

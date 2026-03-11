@@ -9,7 +9,7 @@
  * @value inside
  * @option Fit Height
  * @value height
- * @default height
+ * @default inside
  * @desc 'height' will always fill the screen height. 'inside' is default MV behavior.
  *
  * @help
@@ -21,7 +21,7 @@
     'use strict';
 
     const parameters = PluginManager.parameters('ResolutionScale');
-    const scaleMode = parameters['mode'] || 'height';
+    const scaleMode = parameters['mode'] || 'inside';
 
     let scaleMultiplier = 1.0;
 
