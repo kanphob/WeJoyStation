@@ -43,7 +43,7 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r9 · 2026-03-11';
+    const BUILD = 'v2.2 · r10 · 2026-03-11';
     const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
 
     // Inject a tiny corner badge visible immediately on every page load
@@ -544,7 +544,9 @@
         // Local player
         const localVol = PVC._getVolume(PVC.localAnalyser);
         PVC.isSpeaking = !PVC.muted && localVol > SPEAKING_THRESHOLD;
-        PVC._updateCharacterIcon($gamePlayer, PVC.isSpeaking);
+        
+        // Update HUD every frame to show local talking status
+        PVC._updateHUD();
 
         // Remote peers
         for (const peerId in PVC.peers) {
@@ -556,24 +558,8 @@
             peer.isSpeaking = isSpeaking;
             peer.lastRawVolume = vol;
 
-            // Find character on map to show icon
-            let char = null;
-            // 1. Try Alpha_NETZ network characters
-            if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
-                const chars = ANMapManager.networkCharacters();
-                if (chars) char = chars.find(c => (c._netId === peerId || c.netId === peerId));
-            }
-            // 2. Try Fallback: scan all game characters (Events, Player, Followers)
-            if (!char) {
-                const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
-                char = allChars.find(c => {
-                    if (!c) return false;
-                    // Check netId, _netId, or if it's an event with a name matching the peerId
-                    return c._netId === peerId || c.netId === peerId || (c._title && c._title.includes(peerId));
-                });
-            }
-
-            if (char) PVC._updateCharacterIcon(char, isSpeaking);
+            // Note: Overhead icons removed as requested.
+            // Only tracking noise levels for debug/HUD now.
         }
     };
 
@@ -750,19 +736,29 @@
     PVC._updateHUD = function () {
         if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl) return;
         
-        // Update Mute Status text
-        PVC.statusEl.textContent = PVC.muted ? 'MUTED' : 'VOICE';
-        PVC.statusEl.style.color = PVC.muted ? '#ff6060' : '#60ff90';
-        
-        // Update Speaking Indicator (illuminates green)
-        if (PVC.isSpeaking) {
-            PVC.indicatorEl.style.filter = 'grayscale(0) brightness(1.2) drop-shadow(0 0 5px #60ff90)';
+        if (PVC.muted) {
+            // Muted State: Red Icon + Red Text
+            PVC.statusEl.textContent = 'MUTED';
+            PVC.statusEl.style.color = '#ff6060';
+            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.7) sepia(1) hue-rotate(-50deg) saturate(3)'; // Force Red
             PVC.indicatorEl.style.opacity = '1';
-            PVC.indicatorEl.style.transform = 'scale(1.1)';
-        } else {
-            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.4)';
-            PVC.indicatorEl.style.opacity = '0.5';
             PVC.indicatorEl.style.transform = 'scale(1.0)';
+        } else {
+            // Unmuted State
+            PVC.statusEl.textContent = 'VOICE';
+            PVC.statusEl.style.color = '#60ff90';
+            
+            if (PVC.isSpeaking) {
+                // Talking: Bright Green Glow
+                PVC.indicatorEl.style.filter = 'grayscale(0) brightness(1.3) drop-shadow(0 0 8px #60ff90)';
+                PVC.indicatorEl.style.opacity = '1';
+                PVC.indicatorEl.style.transform = 'scale(1.1)';
+            } else {
+                // Idle: Dim/Gray Green
+                PVC.indicatorEl.style.filter = 'grayscale(0.6) brightness(0.6)';
+                PVC.indicatorEl.style.opacity = '0.6';
+                PVC.indicatorEl.style.transform = 'scale(1.0)';
+            }
         }
     };
 
