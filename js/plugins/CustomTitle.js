@@ -31,9 +31,9 @@
             img.style.pointerEvents = 'none'; // Don't block clicks
             
             if (side === 'left') {
-                img.style.left = '10%';
+                img.style.left = 'calc(50% - 320px)'; // Positioned left of center menu
             } else {
-                img.style.right = '10%';
+                img.style.left = 'calc(50% + 120px)'; // Positioned right of center menu
                 img.style.transform = 'scaleX(-1)'; // Mirror for right side
             }
             
