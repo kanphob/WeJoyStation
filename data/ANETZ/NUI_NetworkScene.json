@@ -11,7 +11,10 @@
                 "type": "image",
                 "parameters": "imageName:networkSceneBackground;folderName:Alpha_NETZ",
                 "bindings": {
-                    "size": { "width": "100%", "height": "100%"}
+                    "size": {
+                        "width": "100%",
+                        "height": "100%"
+                    }
                 }
             }
         ]
@@ -23,18 +26,26 @@
         "bindings": {
             "width": "100%",
             "height": 50,
-            "position": { "x": 0, "y": 50 }
+            "position": {
+                "x": 0,
+                "y": 50
+            }
         },
         "childrens": [
             {
                 "type": "rect",
                 "parameters": "strokeWidth:0;fillGradient:0=#33182f,1=#4f2549;",
-                "effects": ["shadow;rotation:90"],
+                "effects": [
+                    "shadow;rotation:90"
+                ],
                 "bindings": {
                     "width": "100%",
                     "height": "100%",
                     "opacity": 140,
-                    "gradientEnd": { "x": 0, "y": "height" }
+                    "gradientEnd": {
+                        "x": 0,
+                        "y": "height"
+                    }
                 }
             },
             {
@@ -42,16 +53,28 @@
                 "type": "text",
                 "parameters": "alignment:left;textColor:#ffffff;font:size=26,weight=600;outline:color=#000,width=3",
                 "bindings": {
-                    "size": { "width": "70%", "height": "100%"},
-                    "position": { "x": 20, "y": 0 },
-                    "text": ["Welcome, %1", "$getPlayerName"]
+                    "size": {
+                        "width": "70%",
+                        "height": "100%"
+                    },
+                    "position": {
+                        "x": 20,
+                        "y": 0
+                    },
+                    "text": [
+                        "ยินดีต้อนรับ, %1",
+                        "$getPlayerName"
+                    ]
                 }
             },
             {
                 "type": "rect",
                 "parameters": "width:180;height:30;fillColor:#6737a6;fillAlpha:0.5;strokeWidth:0;strokeColor:#391766;corners:24",
                 "bindings": {
-                    "position": { "x": "end - width - 10", "y": "center" }
+                    "position": {
+                        "x": "end - width - 10",
+                        "y": "center"
+                    }
                 },
                 "childrens": [
                     {
@@ -59,22 +82,34 @@
                         "type": "text",
                         "parameters": "alignment:center;textColor:#ccc;font:size=16,weight=300;outline:color=#000,width=2",
                         "bindings": {
-                            "size": { "width": "100%", "height": "100%"},
-                            "position": { "x": 0, "y": 0 },
-                            "text": ["Players on server: %1", "$getPlayersCount"]
+                            "size": {
+                                "width": "100%",
+                                "height": "100%"
+                            },
+                            "position": {
+                                "x": 0,
+                                "y": 0
+                            },
+                            "text": [
+                                "จำนวนผู้เล่น: %1",
+                                "$getPlayersCount"
+                            ]
                         }
                     }
                 ]
             }
         ]
     },
-    "exitButton" : {
+    "exitButton": {
         "id": "exitButton",
         "type": "button",
         "parent": "root",
         "parameters": "width:60;height:40;imageName:field;folderName:Alpha_NETZ;tint:#690909;overTint:#a30d0d;activeTint:#401010",
         "bindings": {
-            "position": { "x": "end - width - 6", "y": 4 },
+            "position": {
+                "x": "end - width - 6",
+                "y": 4
+            },
             "visible": "$isExitButtonVisible"
         },
         "childrens": [
@@ -84,7 +119,10 @@
                 "bindings": {
                     "height": "50%",
                     "width": "45%",
-                    "position": { "x": "center", "y": "center" }
+                    "position": {
+                        "x": "center",
+                        "y": "center"
+                    }
                 }
             }
         ]
@@ -95,7 +133,10 @@
         "parameters": "keyboardHandling;",
         "parent": "root",
         "bindings": {
-            "position": { "x": "center", "y": "center" },
+            "position": {
+                "x": "center",
+                "y": "center"
+            },
             "visible": "~$inModalMode == false"
         },
         "childrens": [
@@ -109,9 +150,15 @@
                         "type": "text",
                         "parameters": "outline:width=4,color=#4040db;",
                         "bindings": {
-                            "size": { "width": "100%", "height": "100%" },
+                            "size": {
+                                "width": "100%",
+                                "height": "100%"
+                            },
                             "fontSize": "40%",
-                            "text": ["%1", "Create Game"]
+                            "text": [
+                                "%1",
+                                "สร้างเกม"
+                            ]
                         }
                     }
                 ]
@@ -121,16 +168,25 @@
                 "type": "button",
                 "parameters": "width:300;height:54;imageName:networkSceneButton;folderName:Alpha_NETZ;tint:#210c1e;overTint:#42073a;activeTint:#2e102a",
                 "bindings": {
-                    "position": { "x": 0, "y": "prevEndY + 6" }
+                    "position": {
+                        "x": 0,
+                        "y": "prevEndY + 6"
+                    }
                 },
                 "childrens": [
                     {
                         "type": "text",
                         "parameters": "outline:width=4,color=#4040db;",
                         "bindings": {
-                            "size": { "width": "100%", "height": "100%" },
+                            "size": {
+                                "width": "100%",
+                                "height": "100%"
+                            },
                             "fontSize": "40%",
-                            "text": ["%1", "Join the Game"]
+                            "text": [
+                                "%1",
+                                "เข้าร่วมเกม"
+                            ]
                         }
                     }
                 ]
@@ -141,16 +197,25 @@
                 "type": "button",
                 "parameters": "width:300;height:54;imageName:networkSceneButton;folderName:Alpha_NETZ;tint:#210c1e;overTint:#42073a;activeTint:#2e102a",
                 "bindings": {
-                    "position": { "x": 0, "y": "prevEndY + 6" }
+                    "position": {
+                        "x": 0,
+                        "y": "prevEndY + 6"
+                    }
                 },
                 "childrens": [
                     {
                         "type": "text",
                         "parameters": "outline:width=4,color=#4040db;",
                         "bindings": {
-                            "size": { "width": "100%", "height": "100%" },
+                            "size": {
+                                "width": "100%",
+                                "height": "100%"
+                            },
                             "fontSize": "40%",
-                            "text": ["%1", "Join Random Game"]
+                            "text": [
+                                "%1",
+                                "เข้าร่วมแบบสุ่ม"
+                            ]
                         }
                     }
                 ]
@@ -160,16 +225,25 @@
                 "type": "button",
                 "parameters": "width:300;height:54;imageName:networkSceneButtonBottom;folderName:Alpha_NETZ;tint:#210c1e;overTint:#42073a;activeTint:#2e102a",
                 "bindings": {
-                    "position": { "x": 0, "y": "prevEndY + 6" }
+                    "position": {
+                        "x": 0,
+                        "y": "prevEndY + 6"
+                    }
                 },
                 "childrens": [
                     {
                         "type": "text",
                         "parameters": "outline:width=4,color=#4040db;",
                         "bindings": {
-                            "size": { "width": "100%", "height": "100%" },
+                            "size": {
+                                "width": "100%",
+                                "height": "100%"
+                            },
                             "fontSize": "40%",
-                            "text": ["%1", "Settings "]
+                            "text": [
+                                "%1",
+                                "เปลี่ยนชื่อโปรไฟล์ "
+                            ]
                         }
                     }
                 ]
