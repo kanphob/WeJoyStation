@@ -43,7 +43,7 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r6 · 2026-03-11';
+    const BUILD = 'v2.2 · r9 · 2026-03-11';
     const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
 
     // Inject a tiny corner badge visible immediately on every page load
@@ -109,6 +109,8 @@
         muted:        false,
         initialized:  false,
         hudEl:        null,
+        indicatorEl:  null, // Noise Detection HUD icon
+        statusEl:     null, // Mute/Voice text
         audioCtx:     null, // Web Audio Context
         localAnalyser: null, 
         _socketReady: false,
@@ -556,13 +558,19 @@
 
             // Find character on map to show icon
             let char = null;
+            // 1. Try Alpha_NETZ network characters
             if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
                 const chars = ANMapManager.networkCharacters();
                 if (chars) char = chars.find(c => (c._netId === peerId || c.netId === peerId));
             }
+            // 2. Try Fallback: scan all game characters (Events, Player, Followers)
             if (!char) {
-                const allChars = [$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])].flat();
-                char = allChars.find(c => c && (c._netId === peerId || c.netId === peerId || (c._title && c._title.includes(peerId))));
+                const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
+                char = allChars.find(c => {
+                    if (!c) return false;
+                    // Check netId, _netId, or if it's an event with a name matching the peerId
+                    return c._netId === peerId || c.netId === peerId || (c._title && c._title.includes(peerId));
+                });
             }
 
             if (char) PVC._updateCharacterIcon(char, isSpeaking);
@@ -581,18 +589,28 @@
         if (visible) {
             if (!el) {
                 el = document.createElement('div');
-                el.innerHTML = '🎤';
-                el.style.cssText = 'position:fixed; pointer-events:none; font-size:24px; text-shadow: 0 0 5px #000; z-index:9000; transition: transform 0.1s, opacity 0.2s;';
+                el.style.cssText = [
+                    'position:fixed',
+                    'pointer-events:none',
+                    'width:48px', 'height:48px',
+                    'background-image:url("img/system/vchat_talking.png")',
+                    'background-size:contain',
+                    'background-repeat:no-repeat',
+                    'z-index:9000',
+                    'transition: transform 0.1s, opacity 0.2s',
+                    'transform: scale(0)',
+                    'opacity: 0'
+                ].join(';');
                 document.body.appendChild(el);
                 PVC._icons.set(char, el);
             }
-            // Position above character
+            // Position above character (center horizontally)
             const x = char.screenX();
-            const y = char.screenY() - 60; // Offset above head
-            el.style.left = (x - 12) + 'px';
-            el.style.top = (y - 12) + 'px';
+            const y = char.screenY() - 70; // Slightly higher
+            el.style.left = (x - 24) + 'px';
+            el.style.top = (y - 24) + 'px';
             el.style.opacity = '1';
-            el.style.transform = 'scale(1.2)';
+            el.style.transform = 'scale(1)';
         } else if (el) {
             el.style.opacity = '0';
             el.style.transform = 'scale(0.5)';
@@ -695,21 +713,57 @@
         el.id = 'vchat-hud';
         el.style.cssText = [
             'position:fixed', 'bottom:12px', 'right:12px',
-            'background:rgba(0,0,0,0.55)', 'color:#fff',
-            'font-size:20px', 'padding:4px 8px', 'border-radius:8px',
+            'display:flex', 'flex-direction:column', 'align-items:center', 'gap:4px',
+            'background:rgba(0,0,0,0.6)', 'padding:8px', 'border-radius:12px',
             'z-index:9999', 'pointer-events:none',
             'font-family:sans-serif', 'user-select:none',
-            'border: 1px solid rgba(255,255,255,0.2)'
+            'border: 1px solid rgba(255,255,255,0.15)',
+            'box-shadow: 0 4px 15px rgba(0,0,0,0.4)',
+            'backdrop-filter: blur(4px)'
         ].join(';');
+
+        // 1. Noise Detection Icon (Top)
+        const indicator = document.createElement('div');
+        indicator.style.cssText = [
+            'width:32px', 'height:32px',
+            'background-image:url("img/system/vchat_talking.png")',
+            'background-size:contain', 'background-repeat:no-repeat',
+            'transition: filter 0.2s, transform 0.1s',
+            'filter: grayscale(1) brightness(0.5)',
+            'opacity: 0.6'
+        ].join(';');
+        
+        // 2. Status Text (Bottom)
+        const status = document.createElement('div');
+        status.style.cssText = 'font-size:14px; font-weight:bold; letter-spacing:0.5px;';
+
+        el.appendChild(indicator);
+        el.appendChild(status);
         document.body.appendChild(el);
+        
         PVC.hudEl = el;
+        PVC.indicatorEl = indicator;
+        PVC.statusEl = status;
         PVC._updateHUD();
     };
 
     PVC._updateHUD = function () {
-        if (!PVC.hudEl) return;
-        PVC.hudEl.textContent = PVC.muted ? '🔇 Muted' : '🎤 Voice';
-        PVC.hudEl.style.color = PVC.muted ? '#ff6060' : '#60ff90';
+        if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl) return;
+        
+        // Update Mute Status text
+        PVC.statusEl.textContent = PVC.muted ? 'MUTED' : 'VOICE';
+        PVC.statusEl.style.color = PVC.muted ? '#ff6060' : '#60ff90';
+        
+        // Update Speaking Indicator (illuminates green)
+        if (PVC.isSpeaking) {
+            PVC.indicatorEl.style.filter = 'grayscale(0) brightness(1.2) drop-shadow(0 0 5px #60ff90)';
+            PVC.indicatorEl.style.opacity = '1';
+            PVC.indicatorEl.style.transform = 'scale(1.1)';
+        } else {
+            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.4)';
+            PVC.indicatorEl.style.opacity = '0.5';
+            PVC.indicatorEl.style.transform = 'scale(1.0)';
+        }
     };
 
     PVC._removeHUD = function () {
