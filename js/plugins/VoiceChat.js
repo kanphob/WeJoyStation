@@ -16,6 +16,15 @@
  * @default m
  * @desc Keyboard key to toggle microphone mute (lowercase letter).
  *
+ * @param micVolume
+ * @text Mic Volume (0.0 to 2.0)
+ * @type number
+ * @decimals 1
+ * @min 0.0
+ * @max 2.0
+ * @default 1.0
+ * @desc Input gain multiplier for your microphone.
+ *
  * @help
  * Proximity Voice Chat v2.1
  * Requires Alpha NET Z + vchat_signal / vchat_end relay on server.
@@ -43,8 +52,9 @@
     // =========================================================================
     // Build version — update this string whenever you push a new version
     // =========================================================================
-    const BUILD = 'v2.2 · r11 · 2026-03-11';
+    const BUILD = 'v2.2 · r12 · 2026-03-11';
     const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
+    const MIC_VOLUME = parseFloat(getParam('micVolume', '1.0'));
 
     // Inject a tiny corner badge visible immediately on every page load
     (function _injectBuildBadge() {
@@ -104,6 +114,7 @@
     // =========================================================================
     const PVC = {
         localStream:  null,
+        processedStream: null, // Mic with Gain applied
         socket:       null,
         peers:        {},   // peerId -> { pc, audioEl, analyser }
         muted:        false,
@@ -113,7 +124,8 @@
         meterEl:      null, // Volume bar fill
         statusEl:     null, // Mute/Voice text
         audioCtx:     null, // Web Audio Context
-        localAnalyser: null, 
+        localAnalyser: null,
+        localGainNode: null, 
         _socketReady: false,
         PROXIMITY_ENABLED: false, 
     };
@@ -289,11 +301,23 @@
             }
             if (PVC.audioCtx.state === 'suspended') PVC.audioCtx.resume();
             
-            // Local Analyser
+            // Local Graph: mic -> gain -> analyser
             const source = PVC.audioCtx.createMediaStreamSource(PVC.localStream);
+            
+            PVC.localGainNode = PVC.audioCtx.createGain();
+            PVC.localGainNode.gain.value = MIC_VOLUME;
+            
             PVC.localAnalyser = PVC.audioCtx.createAnalyser();
             PVC.localAnalyser.fftSize = 512;
-            source.connect(PVC.localAnalyser);
+            
+            // Create a processed stream to send to others
+            const dest = PVC.audioCtx.createMediaStreamDestination();
+            
+            source.connect(PVC.localGainNode);
+            PVC.localGainNode.connect(PVC.localAnalyser);
+            PVC.localGainNode.connect(dest);
+            
+            PVC.processedStream = dest.stream;
 
             PVC.initialized = true;
             logOk('Microphone access GRANTED — voice chat logic enabled!');
@@ -371,13 +395,14 @@
 
         PVC.peers[peerId] = { pc, audioEl };
 
-        if (PVC.localStream) {
-            PVC.localStream.getTracks().forEach(track => {
-                pc.addTrack(track, PVC.localStream);
-                log('Added local track [' + track.kind + '] to peer ' + peerId);
+        const streamToSend = PVC.processedStream || PVC.localStream;
+        if (streamToSend) {
+            streamToSend.getTracks().forEach(track => {
+                pc.addTrack(track, streamToSend);
+                log('Added local ' + (PVC.processedStream ? 'PROCESSED' : 'RAW') + ' track [' + track.kind + '] to peer ' + peerId);
             });
         } else {
-            logErr('localStream is null when creating peer ' + peerId);
+            logErr('No local stream to send to peer ' + peerId);
         }
 
         pc.ontrack = (event) => {
@@ -819,6 +844,20 @@
             setTimeout(_tryGrabExistingSocket, 2000);
         });
     }
+
+    // =========================================================================
+    // Console commands
+    // =========================================================================
+    window.vchatMicVolume = function (val) {
+        if (!PVC.localGainNode) {
+            logErr('Cannot adjust volume — PVC not initialized or mic not active');
+            return;
+        }
+        const v = parseFloat(val);
+        if (isNaN(v)) return;
+        PVC.localGainNode.gain.value = v;
+        logOk('Microphone gain set to ' + v.toFixed(2));
+    };
 
     // =========================================================================
     // Debug helper — type vchatDebug() in browser console
