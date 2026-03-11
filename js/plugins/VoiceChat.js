@@ -144,7 +144,29 @@
     const _tryGrabExistingSocket = function () {
         if (PVC.socket) return; // already have it
 
-        log('Trying to grab socket from io.managers...');
+        log('Trying to grab socket from ANNetwork or io.managers...');
+
+        // Priority 1: Alpha_NETZ internal client socket
+        try {
+            if (typeof ANNetwork !== 'undefined' && ANNetwork.client && ANNetwork.client.socket) {
+                PVC.socket = ANNetwork.client.socket;
+                PVC._socketReady = true;
+                logOk('Socket captured from ANNetwork.client.socket! ID: ' + PVC.socket.id);
+                PVC._attachSocketListeners();
+                return;
+            }
+            if (typeof NGAME !== 'undefined' && NGAME.client && NGAME.client.socket) {
+                PVC.socket = NGAME.client.socket;
+                PVC._socketReady = true;
+                logOk('Socket captured from NGAME.client.socket! ID: ' + PVC.socket.id);
+                PVC._attachSocketListeners();
+                return;
+            }
+        } catch (e) {
+            logErr('Error grabbing socket from ANNetwork/NGAME', e);
+        }
+
+        // Priority 2: io.managers fallback
         try {
             if (typeof io !== 'undefined' && io.managers) {
                 const urls = Object.keys(io.managers);
