@@ -8,5 +8,9 @@
         "width": 816,
         "height": 624,
         "icon": "icon/icon.png"
+    },
+    "dependencies": {
+        "python": "^0.0.4",
+        "python3": "^0.0.1"
     }
 }
