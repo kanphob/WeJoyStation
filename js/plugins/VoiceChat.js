@@ -222,6 +222,10 @@
             logErr('Cannot attach listeners — socket is null');
             return;
         }
+        if (PVC._listenersAttached) {
+            log('Listeners already attached — skipping');
+            return;
+        }
         log('Attaching vchat_signal and vchat_end listeners...');
 
         PVC.socket.on('vchat_signal', async (data) => {
@@ -254,6 +258,7 @@
             PVC.destroy();
         });
 
+        PVC._listenersAttached = true;
         logOk('Signaling listeners attached successfully');
     };
 
@@ -328,9 +333,8 @@
         }
 
         // Re-attach listeners if socket was grabbed in fallback above
-        if (PVC.socket && !PVC._listenersAttached) {
+        if (PVC.socket) {
             PVC._attachSocketListeners();
-            PVC._listenersAttached = true;
         }
 
         // Start discovering players immediately after init
@@ -540,7 +544,15 @@
     // =========================================================================
     PVC.connectToPlayer = function (peerId) {
         if (!PVC.initialized) { log('Not init yet — cannot connect to ' + peerId); return; }
-        if (PVC.peers[peerId]) { return; } // already have peer
+        if (PVC.peers[peerId]) {
+            const state = PVC.peers[peerId].pc.connectionState;
+            if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+                log('Peer ' + peerId + ' is in state ' + state + ' — recreating connection');
+                PVC._closePeer(peerId);
+            } else {
+                return; // already have peer in healthy state
+            }
+        }
         if (peerId === ANNetwork.myId()) { return; }
         log('Connecting to Player: ' + peerId);
         PVC._createPeer(peerId, true);
