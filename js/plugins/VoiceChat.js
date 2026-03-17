@@ -47,7 +47,7 @@
     }
 
     const MAX_DISTANCE = parseInt(getParam('maxHearDistance', '10'), 10);
-    const MUTE_KEY     = getParam('muteKey', 'm').toLowerCase();
+    const MUTE_KEY = getParam('muteKey', 'm').toLowerCase();
 
     // =========================================================================
     // Build version — update this string whenever you push a new version
@@ -78,7 +78,7 @@
             'letter-spacing:0.5px',
             'box-shadow: 0 0 5px rgba(0,255,255,0.3)'
         ].join(';');
-        
+
         const attach = () => {
             if (document.body) document.body.appendChild(badge);
             else setTimeout(attach, 100);
@@ -91,10 +91,10 @@
     // =========================================================================
     const LOG_STYLE = 'color:#00cfff;font-weight:bold';
     const ERR_STYLE = 'color:#ff6060;font-weight:bold';
-    const OK_STYLE  = 'color:#60ff90;font-weight:bold';
+    const OK_STYLE = 'color:#60ff90;font-weight:bold';
 
-    function log(msg)  { console.log('%c[VoiceChat]%c ' + msg, LOG_STYLE, ''); }
-    function logOk(msg){ console.log('%c[VoiceChat ✅]%c ' + msg, OK_STYLE,  ''); }
+    function log(msg) { console.log('%c[VoiceChat]%c ' + msg, LOG_STYLE, ''); }
+    function logOk(msg) { console.log('%c[VoiceChat ✅]%c ' + msg, OK_STYLE, ''); }
     function logErr(msg, err) {
         console.error('%c[VoiceChat ❌]%c ' + msg, ERR_STYLE, '', err || '');
     }
@@ -113,21 +113,21 @@
     // State
     // =========================================================================
     const PVC = {
-        localStream:  null,
+        localStream: null,
         processedStream: null, // Mic with Gain applied
-        socket:       null,
-        peers:        {},   // peerId -> { pc, audioEl, analyser }
-        muted:        false,
-        initialized:  false,
-        hudEl:        null,
-        indicatorEl:  null, // Mic icon
-        meterEl:      null, // Volume bar fill
-        statusEl:     null, // Mute/Voice text
-        audioCtx:     null, // Web Audio Context
+        socket: null,
+        peers: {},   // peerId -> { pc, audioEl, analyser }
+        muted: false,
+        initialized: false,
+        hudEl: null,
+        indicatorEl: null, // Mic icon
+        meterEl: null, // Volume bar fill
+        statusEl: null, // Mute/Voice text
+        audioCtx: null, // Web Audio Context
         localAnalyser: null,
-        localGainNode: null, 
+        localGainNode: null,
         _socketReady: false,
-        PROXIMITY_ENABLED: false, 
+        PROXIMITY_ENABLED: false,
     };
 
     // =========================================================================
@@ -299,29 +299,29 @@
         try {
             PVC.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             PVC.muted = false;
-            
+
             // Setup AudioContext for analysis
             if (!PVC.audioCtx) {
                 PVC.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
             if (PVC.audioCtx.state === 'suspended') PVC.audioCtx.resume();
-            
+
             // Local Graph: mic -> gain -> analyser
             const source = PVC.audioCtx.createMediaStreamSource(PVC.localStream);
-            
+
             PVC.localGainNode = PVC.audioCtx.createGain();
             PVC.localGainNode.gain.value = MIC_VOLUME;
-            
+
             PVC.localAnalyser = PVC.audioCtx.createAnalyser();
             PVC.localAnalyser.fftSize = 512;
-            
+
             // Create a processed stream to send to others
             const dest = PVC.audioCtx.createMediaStreamDestination();
-            
+
             source.connect(PVC.localGainNode);
             PVC.localGainNode.connect(PVC.localAnalyser);
             PVC.localGainNode.connect(dest);
-            
+
             PVC.processedStream = dest.stream;
 
             PVC.initialized = true;
@@ -349,7 +349,7 @@
         if (!PVC.initialized) return;
 
         log('Discovering players in room...');
-        
+
         // Primary source: ANGameManager.playersData (NGAME.playersData)
         // Secondary source: ANNetwork.room.players
         let players = [];
@@ -413,7 +413,7 @@
             logOk('Receiving audio track from ' + peerId);
             const stream = event.streams[0];
             audioEl.srcObject = stream;
-            
+
             // Setup Analyser for this peer
             try {
                 if (PVC.audioCtx) {
@@ -518,7 +518,7 @@
         try {
             await peer.pc.setRemoteDescription(new RTCSessionDescription(sdp));
             await PVC._processIceBuffer(peerId); // Apply any ICE candidates that arrived early
-            
+
             logOk('Answer applied from ' + peerId);
         } catch (e) {
             logErr('setRemoteDescription (answer) failed', e);
@@ -531,7 +531,7 @@
     PVC._handleIce = async function (peerId, candidate) {
         const peer = PVC.peers[peerId];
         if (!peer) { logErr('No peer found for ICE from ' + peerId); return; }
-        
+
         // If there's no remote description yet, buffer the candidate to avoid crash
         if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
             log('Buffering ICE candidate from ' + peerId + ' (waiting for remote description)');
@@ -586,10 +586,10 @@
                 return; // already have peer in healthy state
             }
         }
-        
+
         const myId = ANNetwork.myId();
         if (peerId === myId) { return; }
-        
+
         // Prevent WebRTC Glare by assigning a deterministic initiator based on string ID comparison
         const isInitiator = myId > peerId;
         log('Connecting to Player: ' + peerId + (isInitiator ? ' (Initiator)' : ' (Passive)'));
@@ -621,7 +621,7 @@
         const localVol = PVC._getVolume(PVC.localAnalyser);
         PVC.isSpeaking = !PVC.muted && localVol > SPEAKING_THRESHOLD;
         PVC.lastLocalVol = localVol;
-        
+
         // Update HUD every frame to show local talking status + meter
         PVC._updateHUD();
 
@@ -629,7 +629,7 @@
         for (const peerId in PVC.peers) {
             const peer = PVC.peers[peerId];
             if (!peer || !peer.analyser) continue;
-            
+
             const vol = PVC._getVolume(peer.analyser);
             const isSpeaking = vol > SPEAKING_THRESHOLD;
             peer.isSpeaking = isSpeaking;
@@ -675,7 +675,7 @@
 
             if (peerX !== null) {
                 const dist = Math.abs(myX - peerX) + Math.abs(myY - peerY);
-                const vol  = Math.max(0, 1 - (dist / MAX_DISTANCE));
+                const vol = Math.max(0, 1 - (dist / MAX_DISTANCE));
                 peer.audioEl.volume = vol;
                 peer.lastVolume = vol;
             } else {
@@ -747,7 +747,7 @@
             'transition: filter 0.2s, transform 0.1s',
             'filter: grayscale(1) brightness(0.5)'
         ].join(';');
-        
+
         // 2. Volume Meter Bar (Middle)
         const meterContainer = document.createElement('div');
         meterContainer.style.cssText = 'width:100%; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;';
@@ -763,7 +763,7 @@
         el.appendChild(meterContainer);
         el.appendChild(status);
         document.body.appendChild(el);
-        
+
         PVC.hudEl = el;
         PVC.indicatorEl = indicator;
         PVC.meterEl = meterFill;
@@ -773,7 +773,7 @@
 
     PVC._updateHUD = function () {
         if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl || !PVC.meterEl) return;
-        
+
         if (PVC.muted) {
             // MUTED: Red Theme
             PVC.statusEl.textContent = 'MUTED';
@@ -789,7 +789,7 @@
             PVC.statusEl.textContent = 'VOICE';
             PVC.statusEl.style.color = '#60ff90';
             PVC.meterEl.style.background = '#60ff90';
-            
+
             // Volume Meter update
             const volPercent = Math.min(100, Math.max(0, (PVC.lastLocalVol || 0) * 200)); // boost for visual
             PVC.meterEl.style.width = volPercent + '%';
@@ -954,7 +954,7 @@
         console.log('muteKey          :', MUTE_KEY);
         console.log('ANNetwork conn   :', typeof ANNetwork !== 'undefined' ? ANNetwork.isConnected() : 'ANNetwork MISSING');
         console.log('ANNetwork.myId() :', typeof ANNetwork !== 'undefined' ? ANNetwork.myId() : 'N/A');
-        
+
         const players = (window.ANGameManager && ANGameManager.playersData) ? ANGameManager.playersData : (ANNetwork.room ? ANNetwork.room.players : []);
         console.log('discovered players:', players ? players.map(p => p.id || p.netId) : 'none');
         console.log('active peers     :', Object.keys(PVC.peers));
