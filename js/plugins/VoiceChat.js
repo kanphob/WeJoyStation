@@ -397,7 +397,7 @@
         audioEl.volume = 0;
         document.body.appendChild(audioEl);
 
-        PVC.peers[peerId] = { pc, audioEl };
+        PVC.peers[peerId] = { pc, audioEl, iceBuffer: [] }; // Initialize ice buffer array
 
         const streamToSend = PVC.processedStream || PVC.localStream;
         if (streamToSend) {
@@ -472,12 +472,34 @@
     };
 
     // =========================================================================
+    // Apply Buffered ICE Candidates
+    // =========================================================================
+    PVC._processIceBuffer = async function (peerId) {
+        const peer = PVC.peers[peerId];
+        if (!peer || !peer.iceBuffer || peer.iceBuffer.length === 0) return;
+        if (!peer.pc.remoteDescription) return;
+
+        log('Processing ' + peer.iceBuffer.length + ' buffered ICE candidates for ' + peerId);
+        for (const candidate of peer.iceBuffer) {
+            try {
+                await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+                log('Buffered ICE candidate added from ' + peerId);
+            } catch (e) {
+                logErr('Buffered addIceCandidate failed', e);
+            }
+        }
+        peer.iceBuffer = [];
+    };
+
+    // =========================================================================
     // Handle offer → send answer
     // =========================================================================
     PVC._handleOffer = async function (peerId, sdp) {
         const pc = PVC._createPeer(peerId, false);
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            await PVC._processIceBuffer(peerId); // Apply any ICE candidates that arrived early
+
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             log('Answer created — sending to ' + peerId);
@@ -495,6 +517,8 @@
         if (!peer) { logErr('No peer found for answer from ' + peerId); return; }
         try {
             await peer.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            await PVC._processIceBuffer(peerId); // Apply any ICE candidates that arrived early
+            
             logOk('Answer applied from ' + peerId);
         } catch (e) {
             logErr('setRemoteDescription (answer) failed', e);
@@ -507,6 +531,15 @@
     PVC._handleIce = async function (peerId, candidate) {
         const peer = PVC.peers[peerId];
         if (!peer) { logErr('No peer found for ICE from ' + peerId); return; }
+        
+        // If there's no remote description yet, buffer the candidate to avoid crash
+        if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
+            log('Buffering ICE candidate from ' + peerId + ' (waiting for remote description)');
+            if (!peer.iceBuffer) peer.iceBuffer = [];
+            peer.iceBuffer.push(candidate);
+            return;
+        }
+
         try {
             await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
             log('ICE candidate added from ' + peerId);
@@ -553,9 +586,14 @@
                 return; // already have peer in healthy state
             }
         }
-        if (peerId === ANNetwork.myId()) { return; }
-        log('Connecting to Player: ' + peerId);
-        PVC._createPeer(peerId, true);
+        
+        const myId = ANNetwork.myId();
+        if (peerId === myId) { return; }
+        
+        // Prevent WebRTC Glare by assigning a deterministic initiator based on string ID comparison
+        const isInitiator = myId > peerId;
+        log('Connecting to Player: ' + peerId + (isInitiator ? ' (Initiator)' : ' (Passive)'));
+        PVC._createPeer(peerId, isInitiator);
     };
 
     // =========================================================================
@@ -674,6 +712,9 @@
             PVC.localStream = null;
         }
         PVC.initialized = false;
+        PVC.socket = null; // Clear socket cache
+        PVC._listenersAttached = false; // Reset listener flag
+        PVC._socketReady = false;
         PVC._removeHUD();
         log('Destroyed');
     };
