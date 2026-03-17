@@ -816,7 +816,7 @@
     };
 
     // =========================================================================
-    // Scene_Map: start → init voice chat
+    // Scene_Map: start → wait for room game-start, then init voice chat
     // =========================================================================
     const _Scene_Map_start = Scene_Map.prototype.start;
     Scene_Map.prototype.start = function () {
@@ -827,18 +827,44 @@
             log('ANNetwork undefined — not a multiplayer session, skipping');
             return;
         }
-        
-        if (ANNetwork.isConnected()) {
-            if (!PVC.initialized) {
-                log('Calling PVC.init()...');
-                PVC.init();
-            } else {
-                // Already initialized, just trigger discovery
-                PVC.discoverPlayers();
-            }
-        } else {
+
+        if (!ANNetwork.isConnected()) {
             log('Not connected to network — proximity voice chat idle');
+            return;
         }
+
+        if (PVC.initialized) {
+            // Already initialized (e.g. map transfer) — just re-discover peers
+            log('Already initialized — re-discovering players...');
+            PVC.discoverPlayers();
+            return;
+        }
+
+        // Wait until ANGameManager has received player data from the server
+        // (this happens right after the server logs "Starting game for room ...")
+        let _waitAttempts = 0;
+        const _MAX_WAIT = 40; // 40 × 500ms = 20 seconds max
+        const _waitForRoomReady = function () {
+            const players = (window.ANGameManager && ANGameManager.playersData)
+                ? ANGameManager.playersData
+                : (ANNetwork.room ? ANNetwork.room.players : null);
+
+            const ready = players && players.length > 0;
+            _waitAttempts++;
+
+            if (ready) {
+                logOk('Room game-start detected (' + players.length + ' player(s) in sync data) — initialising voice chat...');
+                PVC.init();
+            } else if (_waitAttempts < _MAX_WAIT) {
+                log('Waiting for room start... attempt #' + _waitAttempts);
+                setTimeout(_waitForRoomReady, 500);
+            } else {
+                logErr('Gave up waiting for room start after ' + (_MAX_WAIT * 500 / 1000) + 's — voice chat not started');
+            }
+        };
+
+        log('Waiting for server room game-start signal before initialising voice chat...');
+        _waitForRoomReady();
     };
 
     // =========================================================================
