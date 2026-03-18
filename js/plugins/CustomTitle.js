@@ -404,6 +404,20 @@
     };
 
     //--------------------------------------------------------------------------
+    // RANDOM TITLE BGM  (Theme6 or Theme7, chosen fresh each visit)
+    //--------------------------------------------------------------------------
+    const _TITLE_BGM_POOL = ['Theme6', 'Theme7'];
+
+    const _Scene_Title_playTitleMusic = Scene_Title.prototype.playTitleMusic;
+    Scene_Title.prototype.playTitleMusic = function () {
+        const chosen = _TITLE_BGM_POOL[Math.floor(Math.random() * _TITLE_BGM_POOL.length)];
+        // Build a BGM object that mirrors the System.json structure
+        const bgm = { name: chosen, pan: 0, pitch: 100, volume: 90 };
+        AudioManager.playBgm(bgm);
+        AudioManager.fadeInBgm(1); // gentle 1-second fade-in
+    };
+
+    //--------------------------------------------------------------------------
     // REMOVE CATS
     //--------------------------------------------------------------------------
     const _Scene_Title_terminate = Scene_Title.prototype.terminate;
