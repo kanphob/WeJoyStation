@@ -337,21 +337,20 @@
             PVC._attachSocketListeners();
         }
 
-        // Start discovering players immediately after init
-        PVC.discoverPlayers();
+        // Start the discovery loop — runs every 5s to catch any player at any time
+        PVC.startDiscoveryLoop();
     };
 
     // =========================================================================
     // Discover and Connect to Players
+    // Runs on a periodic loop so late-joiners are always picked up.
     // =========================================================================
-    PVC._discoveryAttempts = 0;
+    PVC._discoveryInterval = null;
+
     PVC.discoverPlayers = function () {
         if (!PVC.initialized) return;
 
-        log('Discovering players in room...');
-
-        // Primary source: ANGameManager.playersData (NGAME.playersData)
-        // Secondary source: ANNetwork.room.players
+        // Collect current room player list from Alpha_NETZ
         let players = [];
         if (window.ANGameManager && ANGameManager.playersData) {
             players = ANGameManager.playersData;
@@ -360,24 +359,41 @@
         }
 
         if (players.length > 0) {
-            logOk('Found ' + players.length + ' players in room sync data');
+            log('Discovery scan: ' + players.length + ' player(s) in room');
             players.forEach(p => {
                 const pid = p.id || p.netId;
-                if (!pid) return;
-                log('  Checked player: ' + pid + (pid === ANNetwork.myId() ? ' (ME)' : ''));
-                if (pid !== ANNetwork.myId()) {
-                    PVC.connectToPlayer(pid);
-                }
+                if (!pid || pid === ANNetwork.myId()) return;
+                PVC.connectToPlayer(pid);
             });
-            PVC._discoveryAttempts = 0;
         } else {
-            PVC._discoveryAttempts++;
-            if (PVC._discoveryAttempts < 10) {
-                log('No players found in sync data — retry #' + PVC._discoveryAttempts + ' in 2s...');
-                setTimeout(PVC.discoverPlayers, 2000);
-            } else {
-                log('Gave up waiting for initial player list sync');
+            log('Discovery scan: no players in room yet');
+        }
+
+        // Also clean up peers who are no longer in the room
+        const roomIds = players.map(p => p.id || p.netId).filter(Boolean);
+        for (const peerId in PVC.peers) {
+            if (!roomIds.includes(peerId)) {
+                log('Player ' + peerId + ' left room — closing peer');
+                PVC._closePeer(peerId);
             }
+        }
+    };
+
+    // Start a repeating scan every 5 seconds
+    PVC.startDiscoveryLoop = function () {
+        if (PVC._discoveryInterval) return; // already running
+        log('Starting discovery loop (every 5s)...');
+        // Run once immediately, then repeat
+        PVC.discoverPlayers();
+        PVC._discoveryInterval = setInterval(PVC.discoverPlayers, 5000);
+        logOk('Discovery loop started');
+    };
+
+    PVC.stopDiscoveryLoop = function () {
+        if (PVC._discoveryInterval) {
+            clearInterval(PVC._discoveryInterval);
+            PVC._discoveryInterval = null;
+            log('Discovery loop stopped');
         }
     };
 
@@ -701,6 +717,8 @@
     // =========================================================================
     PVC.destroy = function () {
         log('Destroying proximity voice chat...');
+        // Stop the discovery loop first
+        PVC.stopDiscoveryLoop();
         if (PVC.socket && ANNetwork && ANNetwork.myId()) {
             for (const peerId in PVC.peers) {
                 PVC.socket.emit('vchat_end', { to: peerId, from: ANNetwork.myId() });
@@ -816,60 +834,66 @@
     };
 
     // =========================================================================
-    // Scene_Map: start → wait for room game-start, then init voice chat
+    // Hook ANGameManager.startGame — fires exactly when "READY TO START GAME"
+    // is logged, i.e. all actors are bound and all sockets are paired to room.
+    // This is the correct moment to start voice chat.
+    // =========================================================================
+    const _hookANGameManagerStartGame = function () {
+        if (typeof ANGameManager === 'undefined' || typeof ANGameManager.startGame !== 'function') {
+            return false;
+        }
+        const _origStartGame = ANGameManager.startGame;
+        ANGameManager.startGame = function () {
+            _origStartGame.call(this);
+            logOk('"READY TO START GAME" fired — initialising voice chat and stopping title BGM...');
+
+            // Fade out title BGM (Theme6)
+            if (typeof AudioManager !== 'undefined') {
+                AudioManager.fadeOutBgm(1);
+            }
+
+            // Init voice chat if not already done
+            if (!PVC.initialized) {
+                PVC.init();
+            } else {
+                // Already running (e.g. reconnect) — re-discover peers
+                PVC.discoverPlayers();
+            }
+        };
+        logOk('ANGameManager.startGame hooked successfully');
+        return true;
+    };
+
+    // Try to hook immediately; retry until Alpha_NETZ loads
+    let _startGameHookAttempts = 0;
+    const _tryHookStartGame = function () {
+        _startGameHookAttempts++;
+        if (!_hookANGameManagerStartGame()) {
+            if (_startGameHookAttempts < 20) {
+                setTimeout(_tryHookStartGame, 500);
+            } else {
+                logErr('Gave up hooking ANGameManager.startGame after 20 attempts');
+            }
+        }
+    };
+    _tryHookStartGame();
+
+    // =========================================================================
+    // Scene_Map: start — only handles map-transfer re-discovery
+    // (VoiceChat init is now driven by ANGameManager.startGame hook above)
     // =========================================================================
     const _Scene_Map_start = Scene_Map.prototype.start;
     Scene_Map.prototype.start = function () {
         _Scene_Map_start.call(this);
-        log('Scene_Map.start fired');
 
-        if (typeof ANNetwork === 'undefined') {
-            log('ANNetwork undefined — not a multiplayer session, skipping');
-            return;
-        }
-
-        if (!ANNetwork.isConnected()) {
-            log('Not connected to network — proximity voice chat idle');
-            return;
-        }
+        if (typeof ANNetwork === 'undefined' || !ANNetwork.isConnected()) return;
 
         if (PVC.initialized) {
-            // Already initialized (e.g. map transfer) — just re-discover peers
-            log('Already initialized — re-discovering players...');
-            PVC.discoverPlayers();
-            return;
+            // Map transfer while already in session — restart discovery loop
+            log('Scene_Map.start: map transfer detected — restarting discovery loop');
+            PVC.stopDiscoveryLoop();
+            PVC.startDiscoveryLoop();
         }
-
-        // Wait until ANGameManager has received player data from the server
-        // (this happens right after the server logs "Starting game for room ...")
-        let _waitAttempts = 0;
-        const _MAX_WAIT = 40; // 40 × 500ms = 20 seconds max
-        const _waitForRoomReady = function () {
-            const players = (window.ANGameManager && ANGameManager.playersData)
-                ? ANGameManager.playersData
-                : (ANNetwork.room ? ANNetwork.room.players : null);
-
-            const ready = players && players.length > 0;
-            _waitAttempts++;
-
-            if (ready) {
-                logOk('Room game-start detected (' + players.length + ' player(s) in sync data) — initialising voice chat...');
-                // Stop title BGM (Theme6) now that the game room has started
-                if (typeof AudioManager !== 'undefined') {
-                    log('Fading out title BGM (Theme6)...');
-                    AudioManager.fadeOutBgm(1);
-                }
-                PVC.init();
-            } else if (_waitAttempts < _MAX_WAIT) {
-                log('Waiting for room start... attempt #' + _waitAttempts);
-                setTimeout(_waitForRoomReady, 500);
-            } else {
-                logErr('Gave up waiting for room start after ' + (_MAX_WAIT * 500 / 1000) + 's — voice chat not started');
-            }
-        };
-
-        log('Waiting for server room game-start signal before initialising voice chat...');
-        _waitForRoomReady();
     };
 
     // =========================================================================
