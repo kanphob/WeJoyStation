@@ -892,7 +892,15 @@
             if (!PVC.initialized) {
                 PVC.init();
             } else {
-                // Already running (e.g. reconnect) — re-discover peers
+                // Already running (e.g. returning from lobby/map)
+                log('Restarting peer connections for new game session...');
+                // Close all existing peers to force a fresh handshake
+                for (const pid in PVC.peers) {
+                    PVC._closePeer(pid);
+                }
+                // Capture the latest socket from the network manager
+                _tryGrabExistingSocket();
+                // Trigger a fresh discovery scan
                 PVC.discoverPlayers();
             }
         };
