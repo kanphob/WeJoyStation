@@ -337,8 +337,30 @@
             PVC._attachSocketListeners();
         }
 
-        // Start the discovery loop — runs every 5s to catch any player at any time
-        PVC.startDiscoveryLoop();
+        // Ensure socket is ready before starting discovery.
+        // getUserMedia() is async (permission dialog) so the socket state may
+        // have changed by the time we get here — retry grab if still null.
+        if (!PVC.socket) {
+            log('Socket still null after mic grant — starting socket-wait loop...');
+            let _sockWait = 0;
+            const _waitForSocket = function () {
+                _tryGrabExistingSocket();
+                if (PVC.socket) {
+                    logOk('Socket captured after wait — starting discovery loop');
+                    PVC._attachSocketListeners();
+                    PVC.startDiscoveryLoop();
+                } else if (_sockWait++ < 10) {
+                    log('Still waiting for socket... attempt #' + _sockWait);
+                    setTimeout(_waitForSocket, 500);
+                } else {
+                    logErr('Gave up waiting for socket — discovery not started');
+                }
+            };
+            setTimeout(_waitForSocket, 300);
+        } else {
+            // Start the discovery loop — runs every 5s to catch any player at any time
+            PVC.startDiscoveryLoop();
+        }
     };
 
     // =========================================================================
@@ -568,6 +590,14 @@
     // Send a signal to another player
     // =========================================================================
     PVC._signal = function (targetId, payload) {
+        if (!PVC.socket) {
+            // Last-ditch attempt to grab socket before failing
+            _tryGrabExistingSocket();
+            if (PVC.socket) {
+                PVC._attachSocketListeners();
+                logOk('Socket recovered in _signal — retrying emit');
+            }
+        }
         if (!PVC.socket) { logErr('Cannot signal — no socket!'); return; }
         const pkg = { to: targetId, from: ANNetwork.myId(), ...payload };
         log('Emitting vchat_signal type=' + payload.type + ' to=' + targetId);
@@ -847,9 +877,15 @@
             _origStartGame.call(this);
             logOk('"READY TO START GAME" fired — initialising voice chat and stopping title BGM...');
 
-            // Fade out title BGM (Theme6)
+            // Fade out title BGM (Theme6 or Theme7)
             if (typeof AudioManager !== 'undefined') {
-                AudioManager.fadeOutBgm(1);
+                var bgmName = AudioManager._currentBgm ? AudioManager._currentBgm.name : '';
+                if (bgmName === 'Theme6' || bgmName === 'Theme7') {
+                    AudioManager.fadeOutBgm(1);
+                }
+            }
+            if (typeof $gameMap !== 'undefined' && $gameMap) {
+                $gameMap.autoplay();
             }
 
             // Init voice chat if not already done
