@@ -287,7 +287,7 @@
         log('ANNetwork.room = ' + JSON.stringify(roomInfo));
         log('ANGameManager.playersData count = ' + gamePlayers);
 
-        // Check socket
+        // Check socketT
         if (!PVC.socket) {
             log('Socket not captured yet — trying fallback grab...');
             _tryGrabExistingSocket();
@@ -854,6 +854,11 @@
 
             if (ready) {
                 logOk('Room game-start detected (' + players.length + ' player(s) in sync data) — initialising voice chat...');
+                // Stop title BGM (Theme6) now that the game room has started
+                if (typeof AudioManager !== 'undefined') {
+                    log('Fading out title BGM (Theme6)...');
+                    AudioManager.fadeOutBgm(1);
+                }
                 PVC.init();
             } else if (_waitAttempts < _MAX_WAIT) {
                 log('Waiting for room start... attempt #' + _waitAttempts);
