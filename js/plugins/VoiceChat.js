@@ -975,6 +975,7 @@
         
         if (!PVC.initialized || !this._character) {
             if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
+            if (this.netNameplateSpr && this.netNameplateSpr._vchatIconSpr) this.netNameplateSpr._vchatIconSpr.visible = false;
             return;
         }
 
@@ -986,54 +987,84 @@
         } 
         // Remote Peers
         else {
-            const charNetId = this._character._netId || this._character.netId;
-            let matchedPeer = charNetId ? PVC.peers[charNetId] : null;
-            
-            // Fallback for custom title injections
-            if (!matchedPeer) {
-                for (const pid in PVC.peers) {
-                    if (this._character._title && this._character._title.includes(pid)) {
-                        matchedPeer = PVC.peers[pid];
-                        break;
+            for (const pid in PVC.peers) {
+                const peer = PVC.peers[pid];
+                // Only do expensive checks if they are actually speaking
+                if (!peer.isSpeaking) continue;
+                
+                // Check all known AlphaNETZ identification properties
+                if (
+                    this._character._netId === pid || 
+                    this._character.netId === pid ||
+                    (this._character.actor && typeof this._character.actor === 'function' && this._character.actor() && this._character.actor().netId === pid) ||
+                    (this._character._title && this._character._title.includes(pid))
+                ) {
+                    isTalking = true;
+                    break;
+                }
+                
+                // Fallback check against ANMapManager array just in case
+                if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
+                    const chars = ANMapManager.networkCharacters();
+                    if (chars) {
+                        const matched = chars.find(c => c === this._character && (c._netId === pid || c.netId === pid));
+                        if (matched) {
+                            isTalking = true;
+                            break;
+                        }
                     }
                 }
             }
-            
-            if (matchedPeer && matchedPeer.isSpeaking) {
-                isTalking = true;
-            }
         }
 
+        // --- Render Icon ---
         if (isTalking) {
-            if (!this._vchatIconSpr) {
-                this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
-                // Use a proper anchor for positioning next to the name badge
-                this._vchatIconSpr.anchor.x = 0;
-                this._vchatIconSpr.anchor.y = 0.5;
-                this.addChild(this._vchatIconSpr);
-                this._vchatIconSpr._pulseCount = 0;
+            // If AlphaNETZ nameplate exists, render as a child of the nameplate (guarantees correct z-index and tracking)
+            if (this.netNameplateSpr) {
+                if (!this.netNameplateSpr._vchatIconSpr) {
+                    const vSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
+                    vSpr.anchor.x = 0;
+                    vSpr.anchor.y = 0.5;
+                    this.netNameplateSpr.addChild(vSpr);
+                    this.netNameplateSpr._vchatIconSpr = vSpr;
+                    vSpr._pulseCount = 0;
+                }
+                const vSpr = this.netNameplateSpr._vchatIconSpr;
+                vSpr.visible = !!this.netNameplateSpr.visible; // Sync visibility with nameplate
+                
+                vSpr._pulseCount += 0.15;
+                const scale = 0.4 + Math.sin(vSpr._pulseCount) * 0.05;
+                vSpr.scale.set(scale, scale);
+                
+                // Position to the right of the nameplate
+                vSpr.x = 28; 
+                vSpr.y = 0; // Center vertically on the nameplate
+                
+                // Hide fallback sprite if it exists
+                if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
+            } 
+            // Fallback: no nameplate plugin active, render over character sprite
+            else {
+                if (!this._vchatIconSpr) {
+                    this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
+                    this._vchatIconSpr.anchor.x = 0;
+                    this._vchatIconSpr.anchor.y = 0.5;
+                    this.addChild(this._vchatIconSpr);
+                    this._vchatIconSpr._pulseCount = 0;
+                }
+                this._vchatIconSpr.visible = true;
+                
+                this._vchatIconSpr._pulseCount += 0.15;
+                const scale = 0.4 + Math.sin(this._vchatIconSpr._pulseCount) * 0.05;
+                this._vchatIconSpr.scale.set(scale, scale);
+                
+                this._vchatIconSpr.x = 20; 
+                this._vchatIconSpr.y = - (this.patternHeight() || 48) + 8;
             }
-            this._vchatIconSpr.visible = true;
-            
-            this._vchatIconSpr._pulseCount += 0.15;
-            // Mini size, pulses gently
-            const scale = 0.35 + Math.sin(this._vchatIconSpr._pulseCount) * 0.05;
-            this._vchatIconSpr.scale.set(scale, scale);
-            
-            // Position to the right side of the character's head or nameplate
-            this._vchatIconSpr.x = 24; 
-            
-            let yOffset = - (this.patternHeight() || 48) + 8;
-            
-            // Align beautifully with AlphaNETZ nameplates if they exist
-            if (this.netNameplateSpr && this.netNameplateSpr.visible) {
-                yOffset -= 24;
-                this._vchatIconSpr.x = 32; // Push it a bit further right to clear the background rectangle
-            }
-            this._vchatIconSpr.y = yOffset;
         } else {
-            if (this._vchatIconSpr) {
-                this._vchatIconSpr.visible = false;
+            if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
+            if (this.netNameplateSpr && this.netNameplateSpr._vchatIconSpr) {
+                this.netNameplateSpr._vchatIconSpr.visible = false;
             }
         }
     };
