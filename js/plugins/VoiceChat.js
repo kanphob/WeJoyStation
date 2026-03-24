@@ -982,7 +982,7 @@
         
         // Local Player
         if (this._character === $gamePlayer) {
-            isTalking = PVC.isSpeaking;
+            isTalking = false; // Do not show icon for local player
         } 
         // Remote Peers
         else {
@@ -1006,24 +1006,29 @@
 
         if (isTalking) {
             if (!this._vchatIconSpr) {
-                this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_talking'));
-                this._vchatIconSpr.anchor.x = 0.5;
-                this._vchatIconSpr.anchor.y = 1;
+                this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
+                // Use a proper anchor for positioning next to the name badge
+                this._vchatIconSpr.anchor.x = 0;
+                this._vchatIconSpr.anchor.y = 0.5;
                 this.addChild(this._vchatIconSpr);
                 this._vchatIconSpr._pulseCount = 0;
             }
             this._vchatIconSpr.visible = true;
             
             this._vchatIconSpr._pulseCount += 0.15;
-            const scale = 0.7 + Math.sin(this._vchatIconSpr._pulseCount) * 0.15;
+            // Mini size, pulses gently
+            const scale = 0.35 + Math.sin(this._vchatIconSpr._pulseCount) * 0.05;
             this._vchatIconSpr.scale.set(scale, scale);
             
-            // Position above character head
-            let yOffset = -this.patternHeight() - 10;
+            // Position to the right side of the character's head or nameplate
+            this._vchatIconSpr.x = 24; 
             
-            // Push further up if the AlphaNETZ nameplate extension is drawing a nameplate
+            let yOffset = - (this.patternHeight() || 48) + 8;
+            
+            // Align beautifully with AlphaNETZ nameplates if they exist
             if (this.netNameplateSpr && this.netNameplateSpr.visible) {
-                yOffset -= 35;
+                yOffset -= 24;
+                this._vchatIconSpr.x = 32; // Push it a bit further right to clear the background rectangle
             }
             this._vchatIconSpr.y = yOffset;
         } else {
