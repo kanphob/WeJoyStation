@@ -967,6 +967,74 @@
     };
 
     // =========================================================================
+    // Sprite_Character: update → show speaking icon over head/nameplate
+    // =========================================================================
+    const _Sprite_Character_update = Sprite_Character.prototype.update;
+    Sprite_Character.prototype.update = function () {
+        _Sprite_Character_update.call(this);
+        
+        if (!PVC.initialized || !this._character) {
+            if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
+            return;
+        }
+
+        let isTalking = false;
+        
+        // Local Player
+        if (this._character === $gamePlayer) {
+            isTalking = PVC.isSpeaking;
+        } 
+        // Remote Peers
+        else {
+            const charNetId = this._character._netId || this._character.netId;
+            let matchedPeer = charNetId ? PVC.peers[charNetId] : null;
+            
+            // Fallback for custom title injections
+            if (!matchedPeer) {
+                for (const pid in PVC.peers) {
+                    if (this._character._title && this._character._title.includes(pid)) {
+                        matchedPeer = PVC.peers[pid];
+                        break;
+                    }
+                }
+            }
+            
+            if (matchedPeer && matchedPeer.isSpeaking) {
+                isTalking = true;
+            }
+        }
+
+        if (isTalking) {
+            if (!this._vchatIconSpr) {
+                this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_talking'));
+                this._vchatIconSpr.anchor.x = 0.5;
+                this._vchatIconSpr.anchor.y = 1;
+                this.addChild(this._vchatIconSpr);
+                this._vchatIconSpr._pulseCount = 0;
+            }
+            this._vchatIconSpr.visible = true;
+            
+            this._vchatIconSpr._pulseCount += 0.15;
+            const scale = 0.7 + Math.sin(this._vchatIconSpr._pulseCount) * 0.15;
+            this._vchatIconSpr.scale.set(scale, scale);
+            
+            // Position above character head
+            let yOffset = -this.patternHeight() - 10;
+            
+            // Push further up if the AlphaNETZ nameplate extension is drawing a nameplate
+            if (this.netNameplateSpr && this.netNameplateSpr.visible) {
+                yOffset -= 35;
+            }
+            this._vchatIconSpr.y = yOffset;
+        } else {
+            if (this._vchatIconSpr) {
+                this._vchatIconSpr.visible = false;
+            }
+        }
+    };
+
+
+    // =========================================================================
     // Input mapping for mute key
     // =========================================================================
     if (Input.keyMapper) {
@@ -1036,17 +1104,6 @@
             const noise = peer.lastRawVolume !== undefined ? peer.lastRawVolume.toFixed(3) : '?.???';
             console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v + ' noise=' + noise + (peer.isSpeaking ? ' [TALKING]' : ''));
         }
-        // --- Diagnostics for identifying characters ---
-        console.group('Map Characters Diagnostic');
-        const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
-        allChars.forEach((c, index) => {
-            if (!c) return;
-            const keys = Object.keys(c).filter(k => k.includes('Net') || k.includes('Id') || k.includes('net') || k.includes('ID'));
-            const data = {};
-            keys.forEach(k => data[k] = c[k]);
-            console.log(`[Char ${index}] x:${c.x} y:${c.y}`, data, c);
-        });
-        console.groupEnd();
 
         console.groupEnd();
     };
