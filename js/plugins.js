@@ -14,7 +14,7 @@ var $plugins =
 {"name":"PKD_KeyCommands","status":true,"description":"v1.0 - Call common event on keyboard key","parameters":{"keyCommands:structA":"[]"}},
 {"name":"PKD_AmbientSound","status":true,"description":"(v.1.0)[BASIC] Ambient Sound","parameters":{"volumeMod":"60","resetOnMapChange":"false"}},
 {"name":"PKD_MapEnhancer","status":true,"description":"(v.1.0)[BASIC] Map Enhancer","parameters":{"PKD_MapEnhancer":"","openEditorKey":"F10","editorHelpLanguageIndex:int":"0","editorWindowSize:struct":"{\"width:int\":\"540\",\"height:int\":\"800\"}","helpWindowSize:struct":"{\"width:int\":\"820\",\"height:int\":\"240\"}","spacer|endHolder":""}},
-{"name":"VoiceChat","status":true,"description":"(v.2.1) Proximity Voice Chat","parameters":{"maxHearDistance":"10","muteKey":"m"}},
+{"name":"VoiceChat","status":true,"description":"(v.3.0) Multiplayer Voice Chat","parameters":{"maxHearDistance":"10","muteKey":"m","micVolume":"1.0","pushToTalkKey":"v","iceServers":"[]"}},
 {"name":"ResolutionScale","status":true,"description":"Scale game to fit height of device.","parameters":{"mode":"height"}},
 {"name":"CustomTitle","status":true,"description":"Custom Animated Title — Purple background, dancing cats, particles","parameters":{}}
 ];

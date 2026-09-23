@@ -1,1153 +1,423 @@
 /*:
  * @target MZ MV
- * @plugindesc (v.2.1) Proximity Voice Chat — WebRTC P2P audio with distance-based volume
+ * @plugindesc (v3.0) Multiplayer voice: room/proximity, push-to-talk, reconnect and audio controls.
  * @author WeJoyStation
- *
  * @param maxHearDistance
- * @text Max Hear Distance (tiles)
  * @type number
  * @min 1
  * @default 10
- * @desc Players beyond this many tiles cannot hear each other.
- *
  * @param muteKey
- * @text Mute Toggle Key
- * @type string
  * @default m
- * @desc Keyboard key to toggle microphone mute (lowercase letter).
- *
  * @param micVolume
- * @text Mic Volume (0.0 to 2.0)
  * @type number
  * @decimals 1
- * @min 0.0
- * @max 2.0
  * @default 1.0
- * @desc Input gain multiplier for your microphone.
- *
+ * @param pushToTalkKey
+ * @default v
+ * @param iceServers
+ * @type multiline_string
+ * @default []
+ * @desc JSON array of additional RTCIceServer entries (TURN recommended for internet play).
  * @help
- * Proximity Voice Chat v2.1
- * Requires Alpha NET Z + vchat_signal / vchat_end relay on server.
- * Open browser DevTools console to see [VoiceChat] logs.
- * Type vchatDebug() in console to see current state.
+ * Join voice explicitly using the panel in a multiplayer game.
+ * M: mute. V: hold to speak when push-to-talk is selected.
+ * Requires the server's existing vchat_signal / vchat_end relay.
+ * See docs/voice-chat.md for relay requirements and TURN configuration.
  */
-
 (function () {
     'use strict';
-
-    // =========================================================================
-    // Configuration
-    // =========================================================================
-    const PLUGIN_NAME = 'VoiceChat';
-
-    function getParam(name, defaultValue) {
-        const params = PluginManager.parameters(PLUGIN_NAME);
-        return (params && params[name] !== undefined && params[name] !== '')
-            ? params[name] : defaultValue;
-    }
-
-    const MAX_DISTANCE = parseInt(getParam('maxHearDistance', '10'), 10);
-    const MUTE_KEY = getParam('muteKey', 'm').toLowerCase();
-
-    // =========================================================================
-    // Build version — update this string whenever you push a new version
-    // =========================================================================
-    const BUILD = 'v2.2 · r12 · 2026-03-11';
-    const SPEAKING_THRESHOLD = 0.05; // 0.0 to 1.0 (adjusted RMS)
-    const MIC_VOLUME = parseFloat(getParam('micVolume', '1.0'));
-
-    // Inject a tiny corner badge visible immediately on every page load
-    (function _injectBuildBadge() {
-        if (document.getElementById('vchat-build-badge')) return;
-        const badge = document.createElement('div');
-        badge.id = 'vchat-build-badge';
-        badge.textContent = '🎤 PVC ' + BUILD;
-        badge.style.cssText = [
-            'position:fixed',
-            'top:4px',
-            'left:4px',
-            'background:rgba(0,0,0,0.6)',
-            'color:#0ff',
-            'font-size:10px',
-            'font-family:monospace',
-            'padding:2px 6px',
-            'border-radius:4px',
-            'z-index:99999',
-            'pointer-events:none',
-            'user-select:none',
-            'letter-spacing:0.5px',
-            'box-shadow: 0 0 5px rgba(0,255,255,0.3)'
-        ].join(';');
-
-        const attach = () => {
-            if (document.body) document.body.appendChild(badge);
-            else setTimeout(attach, 100);
+    const params = PluginManager.parameters('VoiceChat') || {};
+    const clamp = (v, min, max, fallback) => Number.isFinite(Number(v)) ? Math.max(min, Math.min(max, Number(v))) : fallback;
+    const maxDistance = clamp(params.maxHearDistance || 10, 1, 1000, 10);
+    const muteKey = (params.muteKey || 'm').toLowerCase();
+    const talkKey = (params.pushToTalkKey || 'v').toLowerCase();
+    const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    try {
+        const extra = JSON.parse(params.iceServers || '[]');
+        if (Array.isArray(extra)) rtcConfig.iceServers.push(...extra.filter(s => s && s.urls));
+    } catch (_) { console.warn('[VoiceChat] Invalid iceServers JSON'); }
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('wejoy.voice.settings') || '{}') || {}; } catch (_) { /* Storage may be disabled. */ }
+    const PVC = window.ProximityVoiceChat = {
+        peers: Object.create(null), socket: null, initialized: false, muted: saved.muted !== false,
+        deafened: false, pushToTalk: saved.pushToTalk === true, held: false,
+        PROXIMITY_ENABLED: saved.proximity === true,
+        micVolume: clamp(saved.micVolume == null ? (params.micVolume || 1) : saved.micVolume, 0, 2, 1),
+        outputVolume: clamp(saved.outputVolume == null ? 1 : saved.outputVolume, 0, 1, 1),
+        generation: 0, pending: false, active: false, message: '', isSpeaking: false
+    };
+    const players = () => (window.ANGameManager && Array.isArray(ANGameManager.playersData)) ? ANGameManager.playersData : [];
+    const myId = () => window.ANNetwork ? String(ANNetwork.myId() || '') : '';
+    const member = id => players().some(p => String(p.id) === String(id));
+    const connected = () => window.ANNetwork && ANNetwork.isConnected() && ANNetwork.room;
+    let transport = null;
+    if (window.NetworkClientHandler) {
+        const startClient = NetworkClientHandler.prototype._init;
+        NetworkClientHandler.prototype._init = function () {
+            const result = startClient.apply(this, arguments);
+            transport = this.socket;
+            if (PVC.initialized) PVC._attachSocket(transport);
+            return result;
         };
-        attach();
-    })();
-
-    // =========================================================================
-    // Logging helpers
-    // =========================================================================
-    const LOG_STYLE = 'color:#00cfff;font-weight:bold';
-    const ERR_STYLE = 'color:#ff6060;font-weight:bold';
-    const OK_STYLE = 'color:#60ff90;font-weight:bold';
-
-    function log(msg) { console.log('%c[VoiceChat]%c ' + msg, LOG_STYLE, ''); }
-    function logOk(msg) { console.log('%c[VoiceChat ✅]%c ' + msg, OK_STYLE, ''); }
-    function logErr(msg, err) {
-        console.error('%c[VoiceChat ❌]%c ' + msg, ERR_STYLE, '', err || '');
     }
-
-    // =========================================================================
-    // ICE / STUN servers
-    // =========================================================================
-    const RTC_CONFIG = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-    };
-
-    // =========================================================================
-    // State
-    // =========================================================================
-    const PVC = {
-        localStream: null,
-        processedStream: null, // Mic with Gain applied
-        socket: null,
-        peers: {},   // peerId -> { pc, audioEl, analyser }
-        muted: false,
-        initialized: false,
-        hudEl: null,
-        indicatorEl: null, // Mic icon
-        meterEl: null, // Volume bar fill
-        statusEl: null, // Mute/Voice text
-        audioCtx: null, // Web Audio Context
-        localAnalyser: null,
-        localGainNode: null,
-        _socketReady: false,
-        PROXIMITY_ENABLED: false,
-    };
-
-    // =========================================================================
-    // Intercept NetworkClientHandler to capture the socket
-    // =========================================================================
-    const _hookNetworkClient = function () {
-        if (typeof NetworkClientHandler === 'undefined') {
-            log('NetworkClientHandler not found yet — will retry...');
-            return false;
+    const gameSocket = () => {
+        if (transport && transport.id === myId()) return transport;
+        // Only accept the socket belonging to this game's authenticated identity.
+        const managers = window.io && io.managers || {};
+        for (const key of Object.keys(managers)) {
+            const socket = managers[key].nsps && managers[key].nsps['/'];
+            if (socket && socket.connected && socket.id === myId()) return socket;
         }
-        log('Hooking NetworkClientHandler.start to capture socket...');
-        const _orig = NetworkClientHandler.prototype.start;
-        NetworkClientHandler.prototype.start = function () {
-            _orig.call(this);
-            if (!PVC.socket && this.socket) {
-                PVC.socket = this.socket;
-                PVC._socketReady = true;
-                logOk('Socket captured from NetworkClientHandler! ID: ' + this.socket.id);
-                PVC._attachSocketListeners();
-            } else if (!this.socket) {
-                logErr('NetworkClientHandler.start called but this.socket is null/undefined');
-            } else {
-                log('NetworkClientHandler.start called — socket already captured');
-            }
+        return null;
+    };
+    const persist = () => {
+        try { localStorage.setItem('wejoy.voice.settings', JSON.stringify({ muted: PVC.muted, pushToTalk: PVC.pushToTalk,
+            proximity: PVC.PROXIMITY_ENABLED, micVolume: PVC.micVolume, outputVolume: PVC.outputVolume })); } catch (_) { /* optional */ }
+    };
+    const stopStream = stream => { if (stream) stream.getTracks().forEach(t => { t.onended = null; t.stop(); }); };
+    const report = (message, error) => {
+        PVC.message = message;
+        if (error) console.warn('[VoiceChat]', message, error.name || error.message);
+        PVC._updateHUD();
+    };
+    PVC._applyMute = function () {
+        const enabled = PVC.initialized && !PVC.muted && !PVC.deafened && (!PVC.pushToTalk || PVC.held) && !document.hidden;
+        [PVC.localStream, PVC.processedStream].forEach(s => { if (s) s.getAudioTracks().forEach(t => { t.enabled = enabled; }); });
+        PVC.transmitting = enabled;
+    };
+    PVC.toggleMute = function () { PVC.muted = !PVC.muted; PVC._applyMute(); persist(); PVC._updateHUD(); };
+    PVC._signal = function (id, payload) {
+        if (PVC.initialized && PVC.socket && PVC.socket.connected && member(id)) {
+            PVC.socket.emit('vchat_signal', Object.assign({ to: id, from: myId() }, payload));
+        }
+    };
+    PVC._detachSocket = function () {
+        if (PVC.socket && PVC.handlers) Object.keys(PVC.handlers).forEach(event => PVC.socket.off(event, PVC.handlers[event]));
+        PVC.socket = null;
+        PVC.handlers = null;
+    };
+    PVC._attachSocket = function (socket) {
+        if (!socket || socket === PVC.socket) return;
+        Object.keys(PVC.peers).forEach(PVC._closePeer);
+        PVC._detachSocket();
+        PVC.socket = socket;
+        PVC.handlers = {
+            vchat_signal(data) {
+                if (!PVC.initialized || !connected() || !data || String(data.to) !== myId() ||
+                    !member(data.from) || String(data.from) === myId() || !['offer', 'answer', 'ice'].includes(data.type)) return;
+                const id = String(data.from);
+                const peer = PVC.peers[id] || PVC._createPeer(id);
+                // Serialise SDP and ICE per peer; messages may arrive while an await is pending.
+                peer.queue = peer.queue.then(() => PVC._receive(peer, data)).catch(error => {
+                    if (PVC.peers[id] === peer) { PVC._closePeer(id); report('เชื่อมต่อเสียงใหม่…', error); }
+                });
+            },
+            vchat_end(data) {
+                if (data && String(data.to) === myId() && member(data.from)) PVC._closePeer(String(data.from));
+            },
+            disconnect() { PVC.destroy(); report('เครือข่ายขาดการเชื่อมต่อ — เข้าร่วมเสียงอีกครั้งเมื่อพร้อม'); }
         };
-        logOk('NetworkClientHandler hooked successfully');
-        return true;
+        Object.keys(PVC.handlers).forEach(event => socket.on(event, PVC.handlers[event]));
     };
-
-    // =========================================================================
-    // Try to grab socket from io.managers (fallback for already-connected state)
-    // =========================================================================
-    const _tryGrabExistingSocket = function () {
-        if (PVC.socket) return; // already have it
-
-        log('Trying to grab socket from ANNetwork or io.managers...');
-
-        // Priority 1: Alpha_NETZ internal client socket
-        try {
-            if (typeof ANNetwork !== 'undefined' && ANNetwork.client && ANNetwork.client.socket) {
-                PVC.socket = ANNetwork.client.socket;
-                PVC._socketReady = true;
-                logOk('Socket captured from ANNetwork.client.socket! ID: ' + PVC.socket.id);
-                PVC._attachSocketListeners();
-                return;
-            }
-            if (typeof NGAME !== 'undefined' && NGAME.client && NGAME.client.socket) {
-                PVC.socket = NGAME.client.socket;
-                PVC._socketReady = true;
-                logOk('Socket captured from NGAME.client.socket! ID: ' + PVC.socket.id);
-                PVC._attachSocketListeners();
-                return;
-            }
-        } catch (e) {
-            logErr('Error grabbing socket from ANNetwork/NGAME', e);
-        }
-
-        // Priority 2: io.managers fallback
-        try {
-            if (typeof io !== 'undefined' && io.managers) {
-                const urls = Object.keys(io.managers);
-                log('io.managers URLs found: ' + (urls.length ? urls.join(', ') : '(none)'));
-                for (const url of urls) {
-                    const mgr = io.managers[url];
-                    if (mgr && mgr.nsps && mgr.nsps['/']) {
-                        const sock = mgr.nsps['/'];
-                        if (sock && sock.connected) {
-                            PVC.socket = sock;
-                            PVC._socketReady = true;
-                            logOk('Socket grabbed from io.managers[' + url + '] ID: ' + sock.id);
-                            PVC._attachSocketListeners();
-                            return;
-                        } else {
-                            log('Socket at ' + url + ' exists but not connected yet (connected=' + (sock && sock.connected) + ')');
-                        }
-                    }
-                }
-                log('No connected socket found in io.managers');
-            } else {
-                log('io or io.managers is undefined — Socket.IO may not be loaded yet');
-            }
-        } catch (e) {
-            logErr('Error while grabbing socket from io.managers', e);
-        }
-    };
-
-    // =========================================================================
-    // Attach Socket.IO signaling listeners
-    // =========================================================================
-    PVC._attachSocketListeners = function () {
-        if (!PVC.socket) {
-            logErr('Cannot attach listeners — socket is null');
-            return;
-        }
-        if (PVC._listenersAttached) {
-            log('Listeners already attached — skipping');
-            return;
-        }
-        log('Attaching vchat_signal and vchat_end listeners...');
-
-        PVC.socket.on('vchat_signal', async (data) => {
-            log('Received vchat_signal: type=' + (data && data.type) + ' from=' + (data && data.from) + ' to=' + (data && data.to));
-            if (!data || data.to !== ANNetwork.myId()) {
-                log('Ignoring signal — not for us (our id=' + ANNetwork.myId() + ')');
-                return;
-            }
-            const peerId = data.from;
-            if (data.type === 'offer') {
-                log('Handling OFFER from ' + peerId);
-                await PVC._handleOffer(peerId, data.sdp);
-            } else if (data.type === 'answer') {
-                log('Handling ANSWER from ' + peerId);
-                await PVC._handleAnswer(peerId, data.sdp);
-            } else if (data.type === 'ice') {
-                log('Handling ICE candidate from ' + peerId);
-                await PVC._handleIce(peerId, data.candidate);
-            }
-        });
-
-        PVC.socket.on('vchat_end', (data) => {
-            log('Received vchat_end from ' + (data && data.from));
-            if (!data || data.to !== ANNetwork.myId()) return;
-            PVC._closePeer(data.from);
-        });
-
-        PVC.socket.on('disconnect', () => {
-            log('Socket disconnected — destroying voice chat');
-            PVC.destroy();
-        });
-
-        PVC._listenersAttached = true;
-        logOk('Signaling listeners attached successfully');
-    };
-
-    // =========================================================================
-    // Init — request mic and start
-    // =========================================================================
     PVC.init = async function () {
-        log('init() called');
-
-        if (PVC.initialized) {
-            log('Already initialized — skipping');
-            return;
+        if (PVC.initialized || PVC.pending || !PVC.active || !connected()) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.RTCPeerConnection) {
+            report('เบราว์เซอร์ไม่รองรับเสียง หรือไม่ได้เปิดผ่าน HTTPS / localhost'); return;
         }
-
-        // Check ANNetwork
-        if (typeof ANNetwork === 'undefined') {
-            logErr('ANNetwork is undefined — Alpha_NETZ plugin may not be loaded');
-            return;
-        }
-        log('ANNetwork.isConnected() = ' + ANNetwork.isConnected());
-        log('ANNetwork.myId() = ' + ANNetwork.myId());
-
-        // Log room status for debugging
-        const roomInfo = ANNetwork.room ? { name: ANNetwork.room.name } : 'NULL';
-        const gamePlayers = (window.ANGameManager && ANGameManager.playersData) ? ANGameManager.playersData.length : 'NULL';
-        log('ANNetwork.room = ' + JSON.stringify(roomInfo));
-        log('ANGameManager.playersData count = ' + gamePlayers);
-
-        // Check socketT
-        if (!PVC.socket) {
-            log('Socket not captured yet — trying fallback grab...');
-            _tryGrabExistingSocket();
-        }
-        log('PVC.socket = ' + (PVC.socket ? 'EXISTS (id=' + PVC.socket.id + ')' : 'NULL'));
-
-        // Request microphone
-        log('Requesting microphone access (getUserMedia)...');
+        const generation = ++PVC.generation;
+        PVC.pending = true;
+        report('กำลังขอใช้ไมโครโฟน…');
         try {
-            PVC.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            PVC.muted = false;
-
-            // Setup AudioContext for analysis
-            if (!PVC.audioCtx) {
-                PVC.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (PVC.audioCtx.state === 'suspended') PVC.audioCtx.resume();
-
-            // Local Graph: mic -> gain -> analyser
-            const source = PVC.audioCtx.createMediaStreamSource(PVC.localStream);
-
-            PVC.localGainNode = PVC.audioCtx.createGain();
-            PVC.localGainNode.gain.value = MIC_VOLUME;
-
-            PVC.localAnalyser = PVC.audioCtx.createAnalyser();
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+                echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1
+            }, video: false });
+            if (generation !== PVC.generation || !PVC.active || !connected()) { stopStream(stream); return; }
+            PVC.localStream = stream;
+            stream.getAudioTracks().forEach(t => { t.enabled = false; t.onended = () => { PVC.destroy(); report('ไมโครโฟนถูกถอด — เชื่อมต่อแล้วกดเข้าร่วมใหม่'); }; });
+            const context = PVC.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            await context.resume();
+            if (generation !== PVC.generation) return;
+            PVC.source = context.createMediaStreamSource(stream);
+            PVC.localGainNode = context.createGain();
+            PVC.localGainNode.gain.value = PVC.micVolume;
+            PVC.localAnalyser = context.createAnalyser();
             PVC.localAnalyser.fftSize = 512;
-
-            // Create a processed stream to send to others
-            const dest = PVC.audioCtx.createMediaStreamDestination();
-
-            source.connect(PVC.localGainNode);
+            PVC.destination = context.createMediaStreamDestination();
+            PVC.source.connect(PVC.localGainNode);
             PVC.localGainNode.connect(PVC.localAnalyser);
-            PVC.localGainNode.connect(dest);
-
-            PVC.processedStream = dest.stream;
-
+            PVC.localGainNode.connect(PVC.destination);
+            PVC.processedStream = PVC.destination.stream;
             PVC.initialized = true;
-            logOk('Microphone access GRANTED — voice chat logic enabled!');
-            PVC._createHUD();
-        } catch (err) {
-            logErr('Microphone access DENIED or error: ' + err.name + ' — ' + err.message, err);
-            return;
-        }
-
-        // Re-attach listeners if socket was grabbed in fallback above
-        if (PVC.socket) {
-            PVC._attachSocketListeners();
-        }
-
-        // Ensure socket is ready before starting discovery.
-        // getUserMedia() is async (permission dialog) so the socket state may
-        // have changed by the time we get here — retry grab if still null.
-        if (!PVC.socket) {
-            log('Socket still null after mic grant — starting socket-wait loop...');
-            let _sockWait = 0;
-            const _waitForSocket = function () {
-                _tryGrabExistingSocket();
-                if (PVC.socket) {
-                    logOk('Socket captured after wait — starting discovery loop');
-                    PVC._attachSocketListeners();
-                    PVC.startDiscoveryLoop();
-                } else if (_sockWait++ < 10) {
-                    log('Still waiting for socket... attempt #' + _sockWait);
-                    setTimeout(_waitForSocket, 500);
-                } else {
-                    logErr('Gave up waiting for socket — discovery not started');
-                }
-            };
-            setTimeout(_waitForSocket, 300);
-        } else {
-            // Start the discovery loop — runs every 5s to catch any player at any time
-            PVC.startDiscoveryLoop();
+            PVC._applyMute();
+            PVC._attachSocket(gameSocket());
+            report('');
+            PVC.discoverPlayers();
+        } catch (error) {
+            if (generation !== PVC.generation) return;
+            PVC.destroy();
+            const messages = { NotAllowedError: 'กรุณาอนุญาตไมโครโฟน แล้วกดเข้าร่วมใหม่',
+                NotFoundError: 'ไม่พบไมโครโฟน กรุณาเชื่อมต่ออุปกรณ์', NotReadableError: 'ไมโครโฟนไม่พร้อมใช้งาน หรือถูกแอปอื่นใช้อยู่' };
+            report(messages[error.name] || 'เริ่มเสียงไม่สำเร็จ กรุณาลองอีกครั้ง', error);
+        } finally {
+            if (generation === PVC.generation) PVC.pending = false;
+            PVC._updateHUD();
         }
     };
-
-    // =========================================================================
-    // Discover and Connect to Players
-    // Runs on a periodic loop so late-joiners are always picked up.
-    // =========================================================================
-    PVC._discoveryInterval = null;
-
-    PVC.discoverPlayers = function () {
-        if (!PVC.initialized) return;
-
-        // Collect current room player list from Alpha_NETZ
-        let players = [];
-        if (window.ANGameManager && ANGameManager.playersData) {
-            players = ANGameManager.playersData;
-        } else if (ANNetwork.room && ANNetwork.room.players) {
-            players = ANNetwork.room.players;
-        }
-
-        if (players.length > 0) {
-            log('Discovery scan: ' + players.length + ' player(s) in room');
-            players.forEach(p => {
-                const pid = p.id || p.netId;
-                if (!pid || pid === ANNetwork.myId()) return;
-                PVC.connectToPlayer(pid);
-            });
-        } else {
-            log('Discovery scan: no players in room yet');
-        }
-
-        // Also clean up peers who are no longer in the room
-        const roomIds = players.map(p => p.id || p.netId).filter(Boolean);
-        for (const peerId in PVC.peers) {
-            if (!roomIds.includes(peerId)) {
-                log('Player ' + peerId + ' left room — closing peer');
-                PVC._closePeer(peerId);
-            }
-        }
-    };
-
-    // Start a repeating scan every 5 seconds
-    PVC.startDiscoveryLoop = function () {
-        if (PVC._discoveryInterval) return; // already running
-        log('Starting discovery loop (every 5s)...');
-        // Run once immediately, then repeat
-        PVC.discoverPlayers();
-        PVC._discoveryInterval = setInterval(PVC.discoverPlayers, 5000);
-        logOk('Discovery loop started');
-    };
-
-    PVC.stopDiscoveryLoop = function () {
-        if (PVC._discoveryInterval) {
-            clearInterval(PVC._discoveryInterval);
-            PVC._discoveryInterval = null;
-            log('Discovery loop stopped');
-        }
-    };
-
-    // =========================================================================
-    // Create RTCPeerConnection for a player
-    // =========================================================================
-    PVC._createPeer = function (peerId, isInitiator) {
-        if (PVC.peers[peerId]) {
-            log('Peer ' + peerId + ' already exists — skipping create');
-            return PVC.peers[peerId].pc;
-        }
-
-        log('Creating RTCPeerConnection with ' + peerId + ' (initiator=' + isInitiator + ')');
-        const pc = new RTCPeerConnection(RTC_CONFIG);
+    PVC._createPeer = function (id) {
+        const pc = new RTCPeerConnection(rtcConfig);
         const audioEl = document.createElement('audio');
         audioEl.autoplay = true;
+        audioEl.setAttribute('playsinline', '');
         audioEl.volume = 0;
-        document.body.appendChild(audioEl);
-
-        PVC.peers[peerId] = { pc, audioEl, iceBuffer: [] }; // Initialize ice buffer array
-
-        const streamToSend = PVC.processedStream || PVC.localStream;
-        if (streamToSend) {
-            streamToSend.getTracks().forEach(track => {
-                pc.addTrack(track, streamToSend);
-                log('Added local ' + (PVC.processedStream ? 'PROCESSED' : 'RAW') + ' track [' + track.kind + '] to peer ' + peerId);
-            });
-        } else {
-            logErr('No local stream to send to peer ' + peerId);
-        }
-
-        pc.ontrack = (event) => {
-            logOk('Receiving audio track from ' + peerId);
-            const stream = event.streams[0];
+        const peer = PVC.peers[id] = { id, pc, audioEl, queue: Promise.resolve(), iceBuffer: [],
+            created: Date.now(), lastVolume: 0, makingOffer: false, ignoreOffer: false };
+        PVC.processedStream.getTracks().forEach(t => pc.addTrack(t, PVC.processedStream));
+        pc.onicecandidate = event => {
+            if (PVC.peers[id] === peer && event.candidate) PVC._signal(id, { type: 'ice', candidate: event.candidate });
+        };
+        pc.ontrack = event => {
+            if (PVC.peers[id] !== peer) return;
+            if (peer.source) peer.source.disconnect();
+            if (peer.analyser) peer.analyser.disconnect();
+            const stream = event.streams[0] || new MediaStream([event.track]);
             audioEl.srcObject = stream;
-
-            // Setup Analyser for this peer
-            try {
-                if (PVC.audioCtx) {
-                    const source = PVC.audioCtx.createMediaStreamSource(stream);
-                    const analyser = PVC.audioCtx.createAnalyser();
-                    analyser.fftSize = 512;
-                    source.connect(analyser);
-                    if (PVC.peers[peerId]) PVC.peers[peerId].analyser = analyser;
-                    log('Attached AnalyserNode to peer ' + peerId);
-                }
-            } catch (e) {
-                logErr('Failed to attach AnalyserNode to ' + peerId, e);
-            }
+            peer.source = PVC.audioCtx.createMediaStreamSource(stream);
+            peer.analyser = PVC.audioCtx.createAnalyser();
+            peer.analyser.fftSize = 512;
+            peer.source.connect(peer.analyser);
+            PVC._play(peer);
         };
-
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                log('Sending ICE candidate to ' + peerId);
-                PVC._signal(peerId, { type: 'ice', candidate: event.candidate });
-            } else {
-                log('ICE gathering complete for ' + peerId);
-            }
-        };
-
-        pc.oniceconnectionstatechange = () => {
-            log('ICE state with ' + peerId + ': ' + pc.iceConnectionState);
-        };
-
         pc.onconnectionstatechange = () => {
-            log('Connection state with ' + peerId + ': ' + pc.connectionState);
-            if (pc.connectionState === 'connected') {
-                logOk('✅ P2P audio connected with ' + peerId + '!');
-            }
-            if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-                logErr('Peer ' + peerId + ' connection ' + pc.connectionState);
-                PVC._closePeer(peerId);
-            }
+            if (PVC.peers[id] !== peer) return;
+            if (pc.connectionState === 'disconnected') peer.disconnectedAt = Date.now();
+            if (pc.connectionState === 'connected') { peer.disconnectedAt = 0; PVC.message = ''; }
+            if (pc.connectionState === 'failed' || pc.connectionState === 'closed') PVC._closePeer(id);
         };
-
-        if (isInitiator) {
-            // Manual trigger instead of relying on onnegotiationneeded
-            setTimeout(async () => {
-                log('Initiating handshake for ' + peerId + ' — creating offer...');
-                try {
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    log('Offer created — sending to ' + peerId);
-                    PVC._signal(peerId, { type: 'offer', sdp: pc.localDescription });
-                } catch (e) {
-                    logErr('Offer creation failed', e);
-                }
-            }, 500); // Tiny delay to ensure tracks are ready
-        }
-
-        return pc;
+        return peer;
     };
-
-    // =========================================================================
-    // Apply Buffered ICE Candidates
-    // =========================================================================
-    PVC._processIceBuffer = async function (peerId) {
-        const peer = PVC.peers[peerId];
-        if (!peer || !peer.iceBuffer || peer.iceBuffer.length === 0) return;
-        if (!peer.pc.remoteDescription) return;
-
-        log('Processing ' + peer.iceBuffer.length + ' buffered ICE candidates for ' + peerId);
-        for (const candidate of peer.iceBuffer) {
-            try {
-                await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
-                log('Buffered ICE candidate added from ' + peerId);
-            } catch (e) {
-                logErr('Buffered addIceCandidate failed', e);
-            }
-        }
-        peer.iceBuffer = [];
+    PVC._play = function (peer) {
+        const result = peer.audioEl.play();
+        if (result && result.then) result.then(() => { peer.blocked = false; }).catch(() => { peer.blocked = true; });
     };
-
-    // =========================================================================
-    // Handle offer → send answer
-    // =========================================================================
-    PVC._handleOffer = async function (peerId, sdp) {
-        const pc = PVC._createPeer(peerId, false);
+    PVC.resumeAudio = function () {
+        if (PVC.audioCtx) PVC.audioCtx.resume().catch(() => report('แตะเปิดเสียงอีกครั้ง'));
+        Object.values(PVC.peers).forEach(PVC._play);
+    };
+    PVC._offer = async function (peer) {
+        if (PVC.peers[peer.id] !== peer) return;
+        peer.makingOffer = true;
         try {
-            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-            await PVC._processIceBuffer(peerId); // Apply any ICE candidates that arrived early
-
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            log('Answer created — sending to ' + peerId);
-            PVC._signal(peerId, { type: 'answer', sdp: pc.localDescription });
-        } catch (e) {
-            logErr('Failed to handle offer from ' + peerId, e);
-        }
+            await peer.pc.setLocalDescription(await peer.pc.createOffer());
+            if (PVC.peers[peer.id] === peer) PVC._signal(peer.id, { type: 'offer', sdp: peer.pc.localDescription });
+        } finally { peer.makingOffer = false; }
     };
-
-    // =========================================================================
-    // Handle answer
-    // =========================================================================
-    PVC._handleAnswer = async function (peerId, sdp) {
-        const peer = PVC.peers[peerId];
-        if (!peer) { logErr('No peer found for answer from ' + peerId); return; }
-        try {
-            await peer.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-            await PVC._processIceBuffer(peerId); // Apply any ICE candidates that arrived early
-
-            logOk('Answer applied from ' + peerId);
-        } catch (e) {
-            logErr('setRemoteDescription (answer) failed', e);
-        }
-    };
-
-    // =========================================================================
-    // Handle ICE candidate
-    // =========================================================================
-    PVC._handleIce = async function (peerId, candidate) {
-        const peer = PVC.peers[peerId];
-        if (!peer) { logErr('No peer found for ICE from ' + peerId); return; }
-
-        // If there's no remote description yet, buffer the candidate to avoid crash
-        if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
-            log('Buffering ICE candidate from ' + peerId + ' (waiting for remote description)');
-            if (!peer.iceBuffer) peer.iceBuffer = [];
-            peer.iceBuffer.push(candidate);
+    PVC._receive = async function (peer, data) {
+        if (PVC.peers[peer.id] !== peer || !PVC.initialized) return;
+        const pc = peer.pc;
+        if (data.type === 'ice') {
+            if (!data.candidate || peer.ignoreOffer) return;
+            if (!pc.remoteDescription) {
+                if (peer.iceBuffer.length < 128) peer.iceBuffer.push(data.candidate);
+            } else await pc.addIceCandidate(data.candidate);
             return;
         }
-
-        try {
-            await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
-            log('ICE candidate added from ' + peerId);
-        } catch (e) {
-            logErr('addIceCandidate failed', e);
+        if (!data.sdp || data.sdp.type !== data.type || typeof data.sdp.sdp !== 'string') return;
+        const collision = data.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+        peer.ignoreOffer = collision && myId() > peer.id;
+        if (peer.ignoreOffer) return;
+        if (data.type === 'answer' && pc.signalingState !== 'have-local-offer') return;
+        if (collision) await pc.setLocalDescription({ type: 'rollback' });
+        await pc.setRemoteDescription(data.sdp);
+        for (const candidate of peer.iceBuffer.splice(0)) await pc.addIceCandidate(candidate);
+        if (data.type === 'offer') {
+            await pc.setLocalDescription(await pc.createAnswer());
+            if (PVC.peers[peer.id] === peer) PVC._signal(peer.id, { type: 'answer', sdp: pc.localDescription });
         }
     };
-
-    // =========================================================================
-    // Send a signal to another player
-    // =========================================================================
-    PVC._signal = function (targetId, payload) {
-        if (!PVC.socket) {
-            // Last-ditch attempt to grab socket before failing
-            _tryGrabExistingSocket();
-            if (PVC.socket) {
-                PVC._attachSocketListeners();
-                logOk('Socket recovered in _signal — retrying emit');
-            }
-        }
-        if (!PVC.socket) { logErr('Cannot signal — no socket!'); return; }
-        const pkg = { to: targetId, from: ANNetwork.myId(), ...payload };
-        log('Emitting vchat_signal type=' + payload.type + ' to=' + targetId);
-        PVC.socket.emit('vchat_signal', pkg);
-    };
-
-    // =========================================================================
-    // Close a peer
-    // =========================================================================
-    PVC._closePeer = function (peerId) {
-        const peer = PVC.peers[peerId];
+    PVC._closePeer = function (id) {
+        const peer = PVC.peers[id];
         if (!peer) return;
-        log('Closing peer connection with ' + peerId);
+        delete PVC.peers[id];
+        peer.pc.ontrack = peer.pc.onicecandidate = peer.pc.onconnectionstatechange = null;
         peer.pc.close();
-        if (peer.audioEl && peer.audioEl.parentNode) {
-            peer.audioEl.parentNode.removeChild(peer.audioEl);
-        }
-        delete PVC.peers[peerId];
+        peer.audioEl.pause();
+        peer.audioEl.srcObject = null;
+        if (peer.source) peer.source.disconnect();
+        if (peer.analyser) peer.analyser.disconnect();
     };
-
-    // =========================================================================
-    // Connect to a new player
-    // =========================================================================
-    PVC.connectToPlayer = function (peerId) {
-        if (!PVC.initialized) { log('Not init yet — cannot connect to ' + peerId); return; }
-        if (PVC.peers[peerId]) {
-            const state = PVC.peers[peerId].pc.connectionState;
-            if (state === 'failed' || state === 'closed' || state === 'disconnected') {
-                log('Peer ' + peerId + ' is in state ' + state + ' — recreating connection');
-                PVC._closePeer(peerId);
-            } else {
-                return; // already have peer in healthy state
-            }
-        }
-
-        const myId = ANNetwork.myId();
-        if (peerId === myId) { return; }
-
-        // Prevent WebRTC Glare by assigning a deterministic initiator based on string ID comparison
-        const isInitiator = myId > peerId;
-        log('Connecting to Player: ' + peerId + (isInitiator ? ' (Initiator)' : ' (Passive)'));
-        PVC._createPeer(peerId, isInitiator);
+    PVC.discoverPlayers = function () {
+        if (!PVC.initialized) return;
+        if (!PVC.active || !connected()) { PVC.destroy(); return; }
+        PVC._attachSocket(gameSocket());
+        if (!PVC.socket || !PVC.socket.connected) return;
+        const now = Date.now();
+        Object.keys(PVC.peers).forEach(id => {
+            const p = PVC.peers[id];
+            if (!member(id) || (p.disconnectedAt && now - p.disconnectedAt > 10000) ||
+                (p.pc.connectionState !== 'connected' && now - p.created > 20000)) PVC._closePeer(id);
+        });
+        players().forEach(player => {
+            const id = String(player.id || '');
+            if (!id || id === myId() || PVC.peers[id]) return;
+            const peer = PVC._createPeer(id);
+            if (myId() > id) peer.queue = peer.queue.then(() => PVC._offer(peer)).catch(error => {
+                if (PVC.peers[id] === peer) { PVC._closePeer(id); report('กำลังลองเชื่อมต่อเสียงอีกครั้ง…', error); }
+            });
+        });
     };
-
-    // =========================================================================
-    // Update volumes every frame
-    // =========================================================================
-    // =========================================================================
-    // Helper to get Average Volume (RMS) from AnalyserNode
-    // =========================================================================
     PVC._getVolume = function (analyser) {
         if (!analyser) return 0;
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteFrequencyData(data);
+        const data = analyser._voiceSamples || (analyser._voiceSamples = new Uint8Array(analyser.fftSize));
+        analyser.getByteTimeDomainData(data);
         let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i];
-        return sum / data.length / 255; // Normalize 0-1
+        for (let i = 0; i < data.length; i++) sum += Math.pow((data[i] - 128) / 128, 2);
+        return Math.sqrt(sum / data.length);
     };
-
-    // =========================================================================
-    // Update speaking state and icons for all players
-    // =========================================================================
-    PVC.updateVoiceActivity = function () {
-        if (!PVC.initialized || !$gamePlayer || !$gameMap) return;
-
-        // Local player
-        const localVol = PVC._getVolume(PVC.localAnalyser);
-        PVC.isSpeaking = !PVC.muted && localVol > SPEAKING_THRESHOLD;
-        PVC.lastLocalVol = localVol;
-
-        // Update HUD every frame to show local talking status + meter
-        PVC._updateHUD();
-
-        // Remote peers
-        for (const peerId in PVC.peers) {
-            const peer = PVC.peers[peerId];
-            if (!peer || !peer.analyser) continue;
-
-            const vol = PVC._getVolume(peer.analyser);
-            const isSpeaking = vol > SPEAKING_THRESHOLD;
-            peer.isSpeaking = isSpeaking;
-            peer.lastRawVolume = vol;
-        }
-    };
-
     PVC.updateVolumes = function () {
-        if (!PVC.initialized || !$gamePlayer || !$gameMap) return;
-        const myX = $gamePlayer.x;
-        const myY = $gamePlayer.y;
-
-        for (const peerId in PVC.peers) {
-            const peer = PVC.peers[peerId];
-            if (!peer || !peer.audioEl) continue;
-
-            if (!PVC.PROXIMITY_ENABLED) {
-                peer.audioEl.volume = 1.0;
-                peer.lastVolume = 1.0;
-                continue;
-            }
-
-            let peerX = null, peerY = null;
-
-            // Try ANMapManager (Alpha_NETZ)
-            if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
-                const chars = ANMapManager.networkCharacters();
-                if (chars) {
-                    const ch = chars.find(c => (c._netId === peerId || c.netId === peerId));
-                    if (ch) { peerX = ch.x; peerY = ch.y; }
+        Object.values(PVC.peers).forEach(peer => {
+            let volume = PVC.deafened || peer.muted ? 0 : PVC.outputVolume;
+            if (PVC.PROXIMITY_ENABLED) {
+                const player = players().find(p => String(p.id) === peer.id);
+                const char = window.$gameMap && $gameMap.networkCharacterById ? $gameMap.networkCharacterById(peer.id) : null;
+                if (!player || !window.$gamePlayer || !window.$gameMap || player.mapId !== $gameMap.mapId() || !char) volume = 0;
+                else {
+                    const distance = Math.hypot($gameMap.deltaX($gamePlayer.x, char.x), $gameMap.deltaY($gamePlayer.y, char.y));
+                    volume *= Math.pow(Math.max(0, 1 - distance / maxDistance), 2);
                 }
             }
-
-            // Fallback: scan all game characters
-            if (peerX === null) {
-                const allChars = [$gamePlayer, ...$gameMap.events(), ...($gamePlayer.followers ? $gamePlayer.followers()._data : [])];
-                for (const char of allChars) {
-                    if (char && (char._netId === peerId || char.netId === peerId || (char._title && char._title.includes(peerId)))) {
-                        peerX = char.x; peerY = char.y; break;
-                    }
-                }
-            }
-
-            if (peerX !== null) {
-                const dist = Math.abs(myX - peerX) + Math.abs(myY - peerY);
-                const vol = Math.max(0, 1 - (dist / MAX_DISTANCE));
-                peer.audioEl.volume = vol;
-                peer.lastVolume = vol;
-            } else {
-                peer.audioEl.volume = 1.0;
-                peer.lastVolume = 1.0;
-            }
-        }
-    };
-
-    // =========================================================================
-    // Mute / Unmute
-    // =========================================================================
-    PVC.toggleMute = function () {
-        if (!PVC.localStream) { logErr('Cannot mute — no local stream'); return; }
-        PVC.muted = !PVC.muted;
-        PVC.localStream.getAudioTracks().forEach(t => { t.enabled = !PVC.muted; });
-        PVC._updateHUD();
-        log('Microphone ' + (PVC.muted ? 'MUTED 🔇' : 'UNMUTED 🎤'));
-    };
-
-    // =========================================================================
-    // Destroy everything
-    // =========================================================================
-    PVC.destroy = function () {
-        log('Destroying proximity voice chat...');
-        // Stop the discovery loop first
-        PVC.stopDiscoveryLoop();
-        if (PVC.socket && ANNetwork && ANNetwork.myId()) {
-            for (const peerId in PVC.peers) {
-                PVC.socket.emit('vchat_end', { to: peerId, from: ANNetwork.myId() });
-                PVC._closePeer(peerId);
-            }
-        }
-        if (PVC.localStream) {
-            PVC.localStream.getTracks().forEach(t => t.stop());
-            PVC.localStream = null;
-        }
-        PVC.initialized = false;
-        PVC.socket = null; // Clear socket cache
-        PVC._listenersAttached = false; // Reset listener flag
-        PVC._socketReady = false;
-        PVC._removeHUD();
-        log('Destroyed');
-    };
-
-    // =========================================================================
-    // HUD
-    // =========================================================================
-    PVC._createHUD = function () {
-        if (PVC.hudEl) return;
-        const el = document.createElement('div');
-        el.id = 'vchat-hud';
-        el.style.cssText = [
-            'position:fixed', 'bottom:12px', 'right:12px',
-            'display:flex', 'flex-direction:column', 'align-items:center', 'gap:6px',
-            'background:rgba(0,0,0,0.6)', 'padding:10px', 'border-radius:14px',
-            'z-index:9999', 'pointer-events:none',
-            'font-family:sans-serif', 'user-select:none',
-            'border: 1px solid rgba(255,255,255,0.15)',
-            'box-shadow: 0 4px 15px rgba(0,0,0,0.5)',
-            'backdrop-filter: blur(5px)',
-            'width: 64px'
-        ].join(';');
-
-        // 1. Mic Icon (Top)
-        const indicator = document.createElement('div');
-        indicator.style.cssText = [
-            'width:40px', 'height:40px',
-            'background-image:url("img/system/vchat_talking.png")',
-            'background-size:contain', 'background-repeat:no-repeat',
-            'transition: filter 0.2s, transform 0.1s',
-            'filter: grayscale(1) brightness(0.5)'
-        ].join(';');
-
-        // 2. Volume Meter Bar (Middle)
-        const meterContainer = document.createElement('div');
-        meterContainer.style.cssText = 'width:100%; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;';
-        const meterFill = document.createElement('div');
-        meterFill.style.cssText = 'width:0%; height:100%; background:#60ff90; transition: width 0.05s; box-shadow: 0 0 5px #60ff90;';
-        meterContainer.appendChild(meterFill);
-
-        // 3. Status Text (Bottom)
-        const status = document.createElement('div');
-        status.style.cssText = 'font-size:12px; font-weight:bold; letter-spacing:1px;';
-
-        el.appendChild(indicator);
-        el.appendChild(meterContainer);
-        el.appendChild(status);
-        document.body.appendChild(el);
-
-        PVC.hudEl = el;
-        PVC.indicatorEl = indicator;
-        PVC.meterEl = meterFill;
-        PVC.statusEl = status;
-        PVC._updateHUD();
-    };
-
-    PVC._updateHUD = function () {
-        if (!PVC.hudEl || !PVC.statusEl || !PVC.indicatorEl || !PVC.meterEl) return;
-
-        if (PVC.muted) {
-            // MUTED: Red Theme
-            PVC.statusEl.textContent = 'MUTED';
-            PVC.statusEl.style.color = '#ff6060';
-            // Use CSS filters to force Red on the transparent image
-            PVC.indicatorEl.style.filter = 'grayscale(1) brightness(0.8) sepia(1) hue-rotate(-50deg) saturate(5) drop-shadow(0 0 5px #ff6060)';
-            PVC.indicatorEl.style.opacity = '1';
-            PVC.indicatorEl.style.transform = 'scale(1.0)';
-            PVC.meterEl.style.width = '0%';
-            PVC.meterEl.style.background = '#ff6060';
-        } else {
-            // VOICE: Green/Cyan Theme
-            PVC.statusEl.textContent = 'VOICE';
-            PVC.statusEl.style.color = '#60ff90';
-            PVC.meterEl.style.background = '#60ff90';
-
-            // Volume Meter update
-            const volPercent = Math.min(100, Math.max(0, (PVC.lastLocalVol || 0) * 200)); // boost for visual
-            PVC.meterEl.style.width = volPercent + '%';
-
-            if (PVC.isSpeaking) {
-                // Talking: Glowing Green
-                PVC.indicatorEl.style.filter = 'grayscale(0) brightness(1.3) drop-shadow(0 0 8px #60ff90)';
-                PVC.indicatorEl.style.opacity = '1';
-                PVC.indicatorEl.style.transform = 'scale(1.1)';
-            } else {
-                // Idle: Dim Green
-                PVC.indicatorEl.style.filter = 'grayscale(0.7) brightness(0.5)';
-                PVC.indicatorEl.style.opacity = '0.7';
-                PVC.indicatorEl.style.transform = 'scale(1.0)';
-            }
-        }
-    };
-
-    PVC._removeHUD = function () {
-        if (PVC.hudEl && PVC.hudEl.parentNode) {
-            PVC.hudEl.parentNode.removeChild(PVC.hudEl);
-            PVC.hudEl = null;
-        }
-    };
-
-    // =========================================================================
-    // Hook ANGameManager.startGame — fires exactly when "READY TO START GAME"
-    // is logged, i.e. all actors are bound and all sockets are paired to room.
-    // This is the correct moment to start voice chat.
-    // =========================================================================
-    const _hookANGameManagerStartGame = function () {
-        if (typeof ANGameManager === 'undefined' || typeof ANGameManager.startGame !== 'function') {
-            return false;
-        }
-        const _origStartGame = ANGameManager.startGame;
-        ANGameManager.startGame = function () {
-            _origStartGame.call(this);
-            logOk('"READY TO START GAME" fired — initialising voice chat and stopping title BGM...');
-
-            // Fade out title BGM (Theme6 or Theme7)
-            if (typeof AudioManager !== 'undefined') {
-                var bgmName = AudioManager._currentBgm ? AudioManager._currentBgm.name : '';
-                if (bgmName === 'Theme6' || bgmName === 'Theme7') {
-                    AudioManager.fadeOutBgm(1);
-                }
-            }
-            if (typeof $gameMap !== 'undefined' && $gameMap) {
-                $gameMap.autoplay();
-            }
-
-            // Init voice chat if not already done
-            if (!PVC.initialized) {
-                PVC.init();
-            } else {
-                // Already running (e.g. returning from lobby/map)
-                log('Restarting peer connections for new game session...');
-                // Close all existing peers to force a fresh handshake
-                for (const pid in PVC.peers) {
-                    PVC._closePeer(pid);
-                }
-                // Capture the latest socket from the network manager
-                _tryGrabExistingSocket();
-                // Trigger a fresh discovery scan
-                PVC.discoverPlayers();
-            }
-        };
-        logOk('ANGameManager.startGame hooked successfully');
-        return true;
-    };
-
-    // Try to hook immediately; retry until Alpha_NETZ loads
-    let _startGameHookAttempts = 0;
-    const _tryHookStartGame = function () {
-        _startGameHookAttempts++;
-        if (!_hookANGameManagerStartGame()) {
-            if (_startGameHookAttempts < 20) {
-                setTimeout(_tryHookStartGame, 500);
-            } else {
-                logErr('Gave up hooking ANGameManager.startGame after 20 attempts');
-            }
-        }
-    };
-    _tryHookStartGame();
-
-    // =========================================================================
-    // Scene_Map: start — only handles map-transfer re-discovery
-    // (VoiceChat init is now driven by ANGameManager.startGame hook above)
-    // =========================================================================
-    const _Scene_Map_start = Scene_Map.prototype.start;
-    Scene_Map.prototype.start = function () {
-        _Scene_Map_start.call(this);
-
-        if (typeof ANNetwork === 'undefined' || !ANNetwork.isConnected()) return;
-
-        if (PVC.initialized) {
-            // Map transfer while already in session — restart discovery loop
-            log('Scene_Map.start: map transfer detected — restarting discovery loop');
-            PVC.stopDiscoveryLoop();
-            PVC.startDiscoveryLoop();
-        }
-    };
-
-    // =========================================================================
-    // Scene_Map: update → update volumes + mute key
-    // =========================================================================
-    const _Scene_Map_update = Scene_Map.prototype.update;
-    Scene_Map.prototype.update = function () {
-        _Scene_Map_update.call(this);
-        if (PVC.initialized) {
-            PVC.updateVolumes();
-            PVC.updateVoiceActivity(); // New: Detect noise and show icons
-            if (Input.isTriggered(MUTE_KEY)) PVC.toggleMute();
-        }
-    };
-
-    // =========================================================================
-    // Scene_Map: terminate
-    // =========================================================================
-    const _Scene_Map_terminate = Scene_Map.prototype.terminate;
-    Scene_Map.prototype.terminate = function () {
-        _Scene_Map_terminate.call(this);
-        // We only destroy if we are actually disconnected, to keep it alive during map transfers if possible
-        if (!ANNetwork || !ANNetwork.isConnected()) {
-            log('Leaving network scene — destroying voice chat');
-            PVC.destroy();
-        }
-    };
-
-    // =========================================================================
-    // Sprite_Character: update → show speaking icon over head/nameplate
-    // =========================================================================
-    const _Sprite_Character_update = Sprite_Character.prototype.update;
-    Sprite_Character.prototype.update = function () {
-        _Sprite_Character_update.call(this);
-        
-        if (!PVC.initialized || !this._character) {
-            if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
-            if (this.netNameplateSpr && this.netNameplateSpr._vchatIconSpr) this.netNameplateSpr._vchatIconSpr.visible = false;
-            return;
-        }
-
-        let isTalking = false;
-        
-        // Local Player
-        if (this._character === $gamePlayer) {
-            isTalking = false; // Do not show icon for local player
-        } 
-        // Remote Peers
-        else {
-            for (const pid in PVC.peers) {
-                const peer = PVC.peers[pid];
-                // Only do expensive checks if they are actually speaking
-                if (!peer.isSpeaking) continue;
-                
-                // Check all known AlphaNETZ identification properties
-                if (
-                    this._character._netId === pid || 
-                    this._character.netId === pid ||
-                    (this._character.actor && typeof this._character.actor === 'function' && this._character.actor() && this._character.actor().netId === pid) ||
-                    (this._character._title && this._character._title.includes(pid))
-                ) {
-                    isTalking = true;
-                    break;
-                }
-                
-                // Fallback check against ANMapManager array just in case
-                if (typeof ANMapManager !== 'undefined' && ANMapManager.networkCharacters) {
-                    const chars = ANMapManager.networkCharacters();
-                    if (chars) {
-                        const matched = chars.find(c => c === this._character && (c._netId === pid || c.netId === pid));
-                        if (matched) {
-                            isTalking = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Render Icon ---
-        if (isTalking) {
-            // If AlphaNETZ nameplate exists, render as a child of the nameplate (guarantees correct z-index and tracking)
-            if (this.netNameplateSpr) {
-                if (!this.netNameplateSpr._vchatIconSpr) {
-                    const vSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
-                    vSpr.anchor.x = 0;
-                    vSpr.anchor.y = 0.5;
-                    this.netNameplateSpr.addChild(vSpr);
-                    this.netNameplateSpr._vchatIconSpr = vSpr;
-                    vSpr._pulseCount = 0;
-                }
-                const vSpr = this.netNameplateSpr._vchatIconSpr;
-                vSpr.visible = !!this.netNameplateSpr.visible; // Sync visibility with nameplate
-                
-                vSpr._pulseCount += 0.15;
-                const scale = 0.4 + Math.sin(vSpr._pulseCount) * 0.05;
-                vSpr.scale.set(scale, scale);
-                
-                // Position to the right of the nameplate
-                vSpr.x = 28; 
-                vSpr.y = 0; // Center vertically on the nameplate
-                
-                // Hide fallback sprite if it exists
-                if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
-            } 
-            // Fallback: no nameplate plugin active, render over character sprite
-            else {
-                if (!this._vchatIconSpr) {
-                    this._vchatIconSpr = new Sprite(ImageManager.loadSystem('vchat_balloon'));
-                    this._vchatIconSpr.anchor.x = 0;
-                    this._vchatIconSpr.anchor.y = 0.5;
-                    this.addChild(this._vchatIconSpr);
-                    this._vchatIconSpr._pulseCount = 0;
-                }
-                this._vchatIconSpr.visible = true;
-                
-                this._vchatIconSpr._pulseCount += 0.15;
-                const scale = 0.4 + Math.sin(this._vchatIconSpr._pulseCount) * 0.05;
-                this._vchatIconSpr.scale.set(scale, scale);
-                
-                this._vchatIconSpr.x = 20; 
-                this._vchatIconSpr.y = - (this.patternHeight() || 48) + 8;
-            }
-        } else {
-            if (this._vchatIconSpr) this._vchatIconSpr.visible = false;
-            if (this.netNameplateSpr && this.netNameplateSpr._vchatIconSpr) {
-                this.netNameplateSpr._vchatIconSpr.visible = false;
-            }
-        }
-    };
-
-
-    // =========================================================================
-    // Input mapping for mute key
-    // =========================================================================
-    if (Input.keyMapper) {
-        const keyCode = MUTE_KEY.toUpperCase().charCodeAt(0);
-        Input.keyMapper[keyCode] = MUTE_KEY;
-    }
-
-    // =========================================================================
-    // Hook NetworkClientHandler when ready
-    // =========================================================================
-    let _hookAttempts = 0;
-    const _hookWhenReady = function () {
-        _hookAttempts++;
-        log('Hook attempt #' + _hookAttempts + ' for NetworkClientHandler...');
-        if (!_hookNetworkClient()) {
-            if (_hookAttempts < 20) setTimeout(_hookWhenReady, 500);
-            else logErr('Gave up hooking NetworkClientHandler after 20 attempts');
-        }
-    };
-
-    if (document.readyState === 'complete') {
-        _hookWhenReady();
-        setTimeout(_tryGrabExistingSocket, 2000);
-    } else {
-        window.addEventListener('load', () => {
-            _hookWhenReady();
-            setTimeout(_tryGrabExistingSocket, 2000);
+            peer.audioEl.volume = volume;
+            peer.lastVolume = volume;
+            const level = PVC._getVolume(peer.analyser);
+            if (level > 0.025) peer.spokeAt = Date.now();
+            peer.isSpeaking = volume > 0 && Date.now() - (peer.spokeAt || 0) < 220;
         });
+        PVC.lastLocalVol = PVC.transmitting ? PVC._getVolume(PVC.localAnalyser) : 0;
+        PVC.isSpeaking = PVC.lastLocalVol > 0.025;
+    };
+    PVC.destroy = function () {
+        ++PVC.generation;
+        PVC.pending = false;
+        Object.keys(PVC.peers).forEach(id => {
+            if (PVC.socket && PVC.socket.connected) PVC.socket.emit('vchat_end', { to: id, from: myId() });
+            PVC._closePeer(id);
+        });
+        PVC._detachSocket();
+        stopStream(PVC.localStream);
+        stopStream(PVC.processedStream);
+        ['source', 'localGainNode', 'localAnalyser', 'destination'].forEach(key => { if (PVC[key]) PVC[key].disconnect(); PVC[key] = null; });
+        if (PVC.audioCtx) PVC.audioCtx.close().catch(() => {});
+        PVC.audioCtx = PVC.localStream = PVC.processedStream = null;
+        PVC.initialized = PVC.held = PVC.isSpeaking = PVC.transmitting = false;
+        PVC.lastLocalVol = 0;
+        PVC._updateHUD();
+    };
+    PVC._createHUD = function () {
+        if (PVC.hudEl || !document.body) return;
+        const style = document.createElement('style');
+        style.textContent = '#vchat-hud{position:fixed;right:12px;bottom:12px;z-index:99;width:264px;max-width:calc(100vw - 40px);max-height:65vh;overflow:auto;padding:14px;background:rgba(18,23,39,.94);color:#eef3ff;border:1px solid #536582;border-radius:16px;box-shadow:0 8px 28px #0007;font:13px system-ui,sans-serif;backdrop-filter:blur(12px)}#vchat-hud button,#vchat-hud select{font:inherit;color:#eef3ff;background:#29344e;border:1px solid #647594;border-radius:8px;padding:7px;cursor:pointer}#vchat-hud button:focus-visible,#vchat-hud select:focus-visible{outline:2px solid #7df4d1}#vchat-hud button[aria-pressed="true"]{background:#704052}#vchat-hud .vc-row{display:flex;gap:6px;align-items:center;justify-content:space-between;margin:8px 0}#vchat-hud label{display:block;margin-top:10px}#vchat-hud input{width:100%;accent-color:#7df4d1}#vchat-hud small{color:#b4c3dd}#vchat-hud .vc-meter{height:4px;background:#34405a;border-radius:4px;overflow:hidden;margin:9px 0}#vchat-hud .vc-meter span{display:block;height:100%;background:#7df4d1}#vchat-hud .vc-peer{padding:5px 0;border-top:1px solid #34405a}';
+        document.head.appendChild(style);
+        const el = PVC.hudEl = document.createElement('section');
+        el.id = 'vchat-hud';
+        el.setAttribute('aria-label', 'Voice chat');
+        el.innerHTML = '<div class="vc-row"><strong>VOICE CHAT</strong><small id="vc-count"></small></div><div id="vc-status" role="status"></div><div class="vc-meter"><span id="vc-meter"></span></div><div class="vc-row"><button id="vc-join">เข้าร่วมเสียง</button><button id="vc-mute">ไมค์</button><button id="vc-deafen">หูฟัง</button></div><button id="vc-resume" hidden>แตะเพื่อเปิดเสียง</button><details><summary>ตั้งค่าเสียง</summary><label>โหมดไมค์ <select id="vc-mode"><option value="open">เปิดไมค์</option><option value="ptt">กดเพื่อพูด</option></select></label><button id="vc-talk" style="width:100%;margin-top:8px;touch-action:none">กดค้างเพื่อพูด</button><label>ระยะเสียง <select id="vc-channel"><option value="room">ทั้งห้อง</option><option value="near">เฉพาะคนใกล้</option></select></label><label>ระดับไมค์ <input id="vc-input" type="range" min="0" max="2" step="0.05"></label><label>ระดับเสียงผู้เล่น <input id="vc-output" type="range" min="0" max="1" step="0.05"></label><small id="vc-keys"></small><div id="vc-peers"></div></details>';
+        document.body.appendChild(el);
+        PVC.ui = {};
+        ['count', 'status', 'meter', 'join', 'mute', 'deafen', 'resume', 'mode', 'talk', 'channel', 'input', 'output', 'keys', 'peers'].forEach(k => { PVC.ui[k] = el.querySelector('#vc-' + k); });
+        const ui = PVC.ui;
+        ui.mode.value = PVC.pushToTalk ? 'ptt' : 'open';
+        ui.channel.value = PVC.PROXIMITY_ENABLED ? 'near' : 'room';
+        ui.input.value = PVC.micVolume;
+        ui.output.value = PVC.outputVolume;
+        ui.keys.textContent = muteKey.toUpperCase() + ': ปิด/เปิดไมค์ • ' + talkKey.toUpperCase() + ': กดค้างเพื่อพูด';
+        ui.join.onclick = () => { if (PVC.initialized || PVC.pending) { PVC.destroy(); report('ออกจากเสียงแล้ว'); } else PVC.init(); };
+        ui.mute.onclick = PVC.toggleMute;
+        ui.deafen.onclick = () => { PVC.deafened = !PVC.deafened; PVC._applyMute(); PVC.updateVolumes(); PVC._updateHUD(); };
+        ui.resume.onclick = PVC.resumeAudio;
+        ui.mode.onchange = () => { PVC.pushToTalk = ui.mode.value === 'ptt'; PVC.held = false; PVC._applyMute(); persist(); };
+        ui.channel.onchange = () => { PVC.PROXIMITY_ENABLED = ui.channel.value === 'near'; PVC.updateVolumes(); persist(); };
+        ui.input.oninput = () => { PVC.micVolume = Number(ui.input.value); if (PVC.localGainNode) PVC.localGainNode.gain.value = PVC.micVolume; persist(); };
+        ui.output.oninput = () => { PVC.outputVolume = Number(ui.output.value); PVC.updateVolumes(); persist(); };
+        ui.talk.onpointerdown = event => { ui.talk.setPointerCapture(event.pointerId); PVC.held = true; PVC._applyMute(); };
+        ui.talk.onpointerup = ui.talk.onpointercancel = ui.talk.onlostpointercapture = () => { PVC.held = false; PVC._applyMute(); };
+        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'wheel', 'keydown', 'keyup'].forEach(type => el.addEventListener(type, event => event.stopPropagation()));
+        PVC._updateHUD();
+    };
+    PVC._updateHUD = function () {
+        if (!PVC.ui) return;
+        const ui = PVC.ui;
+        const peers = Object.values(PVC.peers);
+        ui.count.textContent = peers.filter(p => p.pc.connectionState === 'connected').length + ' เชื่อมต่อ';
+        ui.status.textContent = PVC.message || (!PVC.initialized ? 'พร้อมเข้าร่วมเสียง' : PVC.deafened ? 'ปิดเสียงและไมค์' : PVC.muted ? 'ปิดไมค์อยู่' : PVC.pushToTalk && !PVC.held ? 'กดค้างเพื่อพูด' : PVC.isSpeaking ? 'กำลังพูด…' : 'ไมค์พร้อมใช้งาน');
+        ui.join.textContent = PVC.pending ? 'ยกเลิก' : PVC.initialized ? 'ออกจากเสียง' : 'เข้าร่วมเสียง';
+        ui.mute.setAttribute('aria-pressed', String(PVC.muted));
+        ui.mute.title = PVC.muted ? 'เปิดไมโครโฟน' : 'ปิดไมโครโฟน';
+        ui.deafen.setAttribute('aria-pressed', String(PVC.deafened));
+        ui.deafen.title = 'ปิดเสียงผู้เล่นและไมโครโฟน';
+        ui.talk.hidden = !PVC.pushToTalk;
+        ui.resume.hidden = !(PVC.audioCtx && PVC.audioCtx.state === 'suspended') && !peers.some(p => p.blocked);
+        ui.meter.style.width = Math.min(100, (PVC.lastLocalVol || 0) * 400) + '%';
+        // Keep controls stable while focused; update participant rows only when their content changes.
+        const signature = peers.map(p => [p.id, p.pc.connectionState, p.isSpeaking, p.muted, (players().find(x => String(x.id) === p.id) || {}).name].join(':')).join('|');
+        if (PVC.rosterSignature === signature) return;
+        PVC.rosterSignature = signature;
+        ui.peers.textContent = '';
+        peers.forEach(peer => {
+            const row = document.createElement('div'); row.className = 'vc-row vc-peer';
+            const label = document.createElement('span');
+            const player = players().find(p => String(p.id) === peer.id);
+            label.textContent = (peer.isSpeaking ? '● ' : '') + (player && player.name || 'ผู้เล่น') + (peer.pc.connectionState === 'connected' ? '' : ' · กำลังเชื่อมต่อ');
+            const button = document.createElement('button'); button.textContent = peer.muted ? 'เปิดเสียง' : 'ปิดเสียง';
+            button.setAttribute('aria-pressed', String(!!peer.muted));
+            button.onclick = () => { peer.muted = !peer.muted; PVC.updateVolumes(); PVC._updateHUD(); };
+            row.appendChild(label); row.appendChild(button); ui.peers.appendChild(row);
+        });
+    };
+    const editable = target => target && (target.isContentEditable || /INPUT|TEXTAREA|SELECT|BUTTON/.test(target.tagName));
+    document.addEventListener('keydown', event => {
+        if (!PVC.active || !PVC.initialized || event.repeat || event.ctrlKey || event.altKey || event.metaKey || editable(event.target) ||
+            !(SceneManager._scene instanceof Scene_Map)) return;
+        if (event.key.toLowerCase() === muteKey) PVC.toggleMute();
+        if (event.key.toLowerCase() === talkKey) { PVC.held = true; PVC._applyMute(); }
+    });
+    document.addEventListener('keyup', event => { if (event.key.toLowerCase() === talkKey) { PVC.held = false; PVC._applyMute(); } }, true);
+    const release = () => { PVC.held = false; PVC._applyMute(); };
+    window.addEventListener('blur', release);
+    document.addEventListener('visibilitychange', release);
+    window.addEventListener('pagehide', () => PVC.destroy());
+    function hook(object, method, after) {
+        if (!object || typeof object[method] !== 'function') return;
+        const original = object[method];
+        object[method] = function () { const result = original.apply(this, arguments); after(); return result; };
     }
-
-    // =========================================================================
-    // Console commands
-    // =========================================================================
-    window.vchatMicVolume = function (val) {
-        if (!PVC.localGainNode) {
-            logErr('Cannot adjust volume — PVC not initialized or mic not active');
-            return;
+    hook(window.ANGameManager, 'startGame', () => { PVC.destroy(); PVC.active = true; PVC.message = ''; PVC._createHUD(); if (PVC.hudEl) PVC.hudEl.hidden = false; });
+    hook(window.ANGameManager, 'onLeaveRoom', () => { PVC.active = false; PVC.destroy(); if (PVC.hudEl) PVC.hudEl.hidden = true; });
+    hook(window.ANGameManager, 'reset', () => { PVC.active = false; PVC.destroy(); if (PVC.hudEl) PVC.hudEl.hidden = true; });
+    hook(Scene_Map.prototype, 'start', () => {
+        if (connected() && window.ANGameManager && ANGameManager.networkGameStarted) { PVC.active = true; PVC._createHUD(); }
+    });
+    const updateSprite = Sprite_Character.prototype.update;
+    Sprite_Character.prototype.update = function () {
+        updateSprite.apply(this, arguments);
+        const peer = this._character && PVC.peers[String(this._character.id)];
+        if (peer && peer.isSpeaking && !this._voiceIcon) {
+            this._voiceIcon = new Sprite(new Bitmap(32, 24));
+            this._voiceIcon.bitmap.textColor = '#7df4d1';
+            this._voiceIcon.bitmap.drawText('●', 0, 0, 32, 24, 'center');
+            this._voiceIcon.anchor.set(0.5, 1);
+            this.addChild(this._voiceIcon);
         }
-        const v = parseFloat(val);
-        if (isNaN(v)) return;
-        PVC.localGainNode.gain.value = v;
-        logOk('Microphone gain set to ' + v.toFixed(2));
+        if (this._voiceIcon) { this._voiceIcon.visible = !!(PVC.initialized && peer && peer.isSpeaking); this._voiceIcon.y = -this.patternHeight() - 4; }
     };
-
-    // =========================================================================
-    // Debug helper — type vchatDebug() in browser console
-    // =========================================================================
-    window.vchatDebug = function () {
-        console.group('%c[VoiceChat] Debug Report', LOG_STYLE);
-        console.log('BUILD            :', BUILD);
-        console.log('initialized      :', PVC.initialized);
-        console.log('socket           :', PVC.socket ? 'EXISTS (id=' + PVC.socket.id + ')' : 'NULL');
-        console.log('socketReady      :', PVC._socketReady);
-        console.log('localStream      :', PVC.localStream ? 'ACTIVE' : 'NULL');
-        console.log('muted            :', PVC.muted);
-        console.log('maxDistance      :', MAX_DISTANCE, 'tiles');
-        console.log('proximityEnabled :', PVC.PROXIMITY_ENABLED);
-        console.log('muteKey          :', MUTE_KEY);
-        console.log('ANNetwork conn   :', typeof ANNetwork !== 'undefined' ? ANNetwork.isConnected() : 'ANNetwork MISSING');
-        console.log('ANNetwork.myId() :', typeof ANNetwork !== 'undefined' ? ANNetwork.myId() : 'N/A');
-
-        const players = (window.ANGameManager && ANGameManager.playersData) ? ANGameManager.playersData : (ANNetwork.room ? ANNetwork.room.players : []);
-        console.log('discovered players:', players ? players.map(p => p.id || p.netId) : 'none');
-        console.log('active peers     :', Object.keys(PVC.peers));
-        for (const [id, peer] of Object.entries(PVC.peers)) {
-            const v = peer.lastVolume !== undefined ? peer.lastVolume.toFixed(2) : '?.??';
-            const noise = peer.lastRawVolume !== undefined ? peer.lastRawVolume.toFixed(3) : '?.???';
-            console.log('  peer ' + id + ': state=' + peer.pc.connectionState + ' ice=' + peer.pc.iceConnectionState + ' volume=' + v + ' noise=' + noise + (peer.isSpeaking ? ' [TALKING]' : ''));
-        }
-
-        console.groupEnd();
-    };
-
-    // Expose for debugging
-    window.ProximityVoiceChat = PVC;
-
-    logOk('Proximity Voice Chat ' + BUILD + ' loaded');
-    log('Type vchatDebug() in console any time to see full state');
-
+    // Runs outside Scene_Map too, so menus cannot leave proximity volume stale.
+    setInterval(() => {
+        if (!PVC.active) return;
+        if (!connected()) { PVC.active = false; PVC.destroy(); }
+        if (PVC.hudEl) PVC.hudEl.hidden = !PVC.active;
+        if (PVC.initialized) { PVC._applyMute(); PVC.updateVolumes(); }
+        PVC._updateHUD();
+    }, 100);
+    setInterval(() => PVC.discoverPlayers(), 3000);
+    window.vchatMicVolume = value => { PVC.micVolume = clamp(value, 0, 2, 1); if (PVC.localGainNode) PVC.localGainNode.gain.value = PVC.micVolume; if (PVC.ui) PVC.ui.input.value = PVC.micVolume; persist(); };
+    window.vchatDebug = () => ({ initialized: PVC.initialized, muted: PVC.muted, proximity: PVC.PROXIMITY_ENABLED,
+        peers: Object.values(PVC.peers).map(p => ({ id: p.id, state: p.pc.connectionState, ice: p.pc.iceConnectionState, volume: p.lastVolume })) });
 })();

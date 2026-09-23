@@ -9,6 +9,9 @@
         "height": 624,
         "icon": "icon/icon.png"
     },
+    "scripts": {
+        "start": "npx browser-sync start --server --files \"js/**/*.js,*.html,css/*.css\""
+    },
     "dependencies": {
         "python": "^0.0.4",
         "python3": "^0.0.1"
